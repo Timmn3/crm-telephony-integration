@@ -1,0 +1,18 @@
+# Telegram bot framework
+aiogram>=3.13,<4.0
+
+# HTTP server for webhooks / healthcheck
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27
+
+# Database
+SQLAlchemy[asyncio]>=2.0,<2.1
+asyncpg>=0.29
+alembic>=1.13
+
+# HTTP client for amoCRM / Mango
+aiohttp>=3.9
+
+# Configuration
+pydantic>=2.5
+pydantic-settings>=2.1

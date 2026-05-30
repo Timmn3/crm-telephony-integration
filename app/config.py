@@ -1,0 +1,102 @@
+"""Конфигурация приложения через переменные окружения (.env).
+
+Все секреты и настройки читаются из .env через pydantic-settings.
+Никогда не храните реальные секреты в коде — только в .env (см. .env.example).
+"""
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Настройки приложения.
+
+    Значения берутся из переменных окружения или файла .env.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # ------------------------------------------------------------------ Telegram
+    bot_token: str = Field(..., alias="BOT_TOKEN")
+    admin_tg_ids: list[int] = Field(default_factory=list, alias="ADMIN_TG_IDS")
+
+    # ------------------------------------------------------------------ PostgreSQL
+    db_host: str = Field("localhost", alias="DB_HOST")
+    db_port: int = Field(5432, alias="DB_PORT")
+    db_name: str = Field("call_masking_bot", alias="DB_NAME")
+    db_user: str = Field("bot", alias="DB_USER")
+    db_password: str = Field("", alias="DB_PASSWORD")
+
+    # ------------------------------------------------------------------ amoCRM
+    amocrm_subdomain: str = Field("", alias="AMOCRM_SUBDOMAIN")
+    amocrm_access_token: str = Field("", alias="AMOCRM_ACCESS_TOKEN")
+    amocrm_refresh_token: str = Field("", alias="AMOCRM_REFRESH_TOKEN")
+    amocrm_client_id: str = Field("", alias="AMOCRM_CLIENT_ID")
+    amocrm_client_secret: str = Field("", alias="AMOCRM_CLIENT_SECRET")
+    amocrm_redirect_uri: str = Field("", alias="AMOCRM_REDIRECT_URI")
+    amo_address_field_id: int | None = Field(None, alias="AMO_ADDRESS_FIELD_ID")
+    amo_phone_field_id: int | None = Field(None, alias="AMO_PHONE_FIELD_ID")
+
+    # ------------------------------------------------------------------ Mango Office
+    mango_api_key: str = Field("", alias="MANGO_API_KEY")
+    mango_api_salt: str = Field("", alias="MANGO_API_SALT")
+    mango_api_url: str = Field("https://app.mango-office.ru/vpbx", alias="MANGO_API_URL")
+    mango_line_number: str = Field("", alias="MANGO_LINE_NUMBER")
+
+    # ------------------------------------------------------------------ Сервер
+    server_host: str = Field("0.0.0.0", alias="SERVER_HOST")
+    server_port: int = Field(8080, alias="SERVER_PORT")
+    webhook_base_url: str = Field("", alias="WEBHOOK_BASE_URL")
+
+    # ------------------------------------------------------------------ Прочее
+    log_level: str = Field("INFO", alias="LOG_LEVEL")
+
+    @field_validator("admin_tg_ids", mode="before")
+    @classmethod
+    def _parse_admin_ids(cls, value: object) -> list[int]:
+        """Парсит список admin id из строки "123,456" или из списка."""
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            return [int(part.strip()) for part in value.split(",") if part.strip()]
+        if isinstance(value, (list, tuple)):
+            return [int(part) for part in value]
+        raise ValueError("ADMIN_TG_IDS должен быть строкой с запятыми или списком")
+
+    @property
+    def database_url(self) -> str:
+        """Async DSN для SQLAlchemy + asyncpg."""
+        return (
+            f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
+
+    @property
+    def database_url_sync(self) -> str:
+        """Sync DSN (для Alembic, использует psycopg/asyncpg драйвер через async)."""
+        return (
+            f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
+
+    @property
+    def amocrm_base_url(self) -> str:
+        """Базовый URL amoCRM API."""
+        subdomain = self.amocrm_subdomain
+        if subdomain and not subdomain.startswith("http"):
+            return f"https://{subdomain}"
+        return subdomain
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Возвращает кэшированный экземпляр настроек."""
+    return Settings()  # type: ignore[call-arg]
