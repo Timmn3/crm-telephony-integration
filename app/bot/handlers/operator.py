@@ -19,9 +19,10 @@ from app.bot.keyboards.inline import (
     managers_keyboard,
     regions_keyboard,
     send_target_keyboard,
+    skip_reason_keyboard,
 )
-from app.bot.states import CreateOrder
-from app.db.models import OrderStatus
+from app.bot.states import CreateOrder, RejectCall
+from app.db.models import Order, OrderStatus, User, UserRole
 from app.db.repositories import order_repo, region_repo, user_repo
 from app.services import order_service
 from app.services.amocrm import AmoCRMClient, AmoCRMError, LeadNotFound, PhoneNotFound
@@ -246,3 +247,155 @@ async def my_orders(message: Message, session: AsyncSession) -> None:
             f"#{o.amo_lead_id} — {html.escape(o.client_name)} — <i>{status}</i>"
         )
     await message.answer("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# Одобрение / отклонение звонка
+# --------------------------------------------------------------------------- #
+
+def _can_manage_call(user: User | None, order: Order) -> bool:
+    """Может ли пользователь одобрять/отклонять звонок по этой заявке."""
+    if user is None or not user.is_active:
+        return False
+    if user.role == UserRole.ADMIN:
+        return True
+    return user.role == UserRole.OPERATOR and order.operator_tg_id == user.tg_id
+
+
+async def _manager_name(session: AsyncSession, order: Order) -> str | None:
+    if order.manager_tg_id is None:
+        return None
+    manager = await user_repo.get_by_tg_id(session, order.manager_tg_id)
+    if manager is None:
+        return None
+    return manager.full_name or (f"@{manager.tg_username}" if manager.tg_username else str(manager.tg_id))
+
+
+@router.callback_query(F.data.startswith("approve_call:"))
+async def approve_call(
+    callback: CallbackQuery, user: User | None, session: AsyncSession, bot: Bot
+) -> None:
+    order_id = int(callback.data.split(":")[1])
+    order = await order_repo.get_by_id(session, order_id)
+    if order is None:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    if not _can_manage_call(user, order):
+        await callback.answer("Нет доступа к этой заявке.", show_alert=True)
+        return
+    if order.status != OrderStatus.CALL_REQUESTED:
+        await callback.answer("Запрос уже обработан.", show_alert=True)
+        return
+
+    await order_repo.set_status(
+        session, order, OrderStatus.CALL_APPROVED, set_call_approved_at=True
+    )
+    await order_service.refresh_cards(
+        bot, session, order, manager_name=await _manager_name(session, order)
+    )
+    try:
+        await callback.message.edit_text(
+            f"✅ Звонок одобрен по заявке #{order.amo_lead_id}."
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    await callback.answer("Звонок одобрен.")
+
+    if order.manager_tg_id:
+        try:
+            await bot.send_message(
+                order.manager_tg_id,
+                f"✅ Оператор одобрил звонок по заявке #{order.amo_lead_id}. "
+                "Нажмите «Позвонить клиенту» в карточке заявки.",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("Не удалось уведомить менеджера об одобрении звонка")
+    logger.info("Оператор tg_id=%s одобрил звонок по заявке #%s",
+                callback.from_user.id, order_id)
+
+
+@router.callback_query(F.data.startswith("reject_call:"))
+async def reject_call_start(
+    callback: CallbackQuery, user: User | None, session: AsyncSession, state: FSMContext
+) -> None:
+    order_id = int(callback.data.split(":")[1])
+    order = await order_repo.get_by_id(session, order_id)
+    if order is None:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    if not _can_manage_call(user, order):
+        await callback.answer("Нет доступа к этой заявке.", show_alert=True)
+        return
+    if order.status != OrderStatus.CALL_REQUESTED:
+        await callback.answer("Запрос уже обработан.", show_alert=True)
+        return
+
+    await state.set_state(RejectCall.waiting_reason)
+    await state.update_data(reject_order_id=order_id)
+    try:
+        await callback.message.edit_text(
+            f"Отклонение звонка по заявке #{order.amo_lead_id}.\n"
+            "Введите причину одним сообщением или нажмите кнопку.",
+            reply_markup=skip_reason_keyboard(order_id),
+        )
+    except Exception:  # noqa: BLE001
+        await callback.message.answer(
+            "Введите причину отклонения или нажмите «Без причины».",
+            reply_markup=skip_reason_keyboard(order_id),
+        )
+    await callback.answer()
+
+
+@router.message(RejectCall.waiting_reason)
+async def reject_call_reason(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    data = await state.get_data()
+    order_id = data.get("reject_order_id")
+    await state.clear()
+    await _do_reject(message, order_id, (message.text or "").strip() or None, session, bot)
+
+
+@router.callback_query(RejectCall.waiting_reason, F.data.startswith("reject_noreason:"))
+async def reject_call_no_reason(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    order_id = int(callback.data.split(":")[1])
+    await state.clear()
+    await _do_reject(callback.message, order_id, None, session, bot)
+    await callback.answer()
+
+
+async def _do_reject(
+    message: Message, order_id: int | None, reason: str | None,
+    session: AsyncSession, bot: Bot,
+) -> None:
+    if order_id is None:
+        await message.answer("Не удалось определить заявку.")
+        return
+    order = await order_repo.get_by_id(session, order_id)
+    if order is None:
+        await message.answer("Заявка не найдена.")
+        return
+    if order.status != OrderStatus.CALL_REQUESTED:
+        await message.answer("Запрос на звонок уже обработан.")
+        return
+
+    # Возврат к статусу TAKEN — кнопка «Запросить звонок» снова доступна.
+    await order_repo.set_status(session, order, OrderStatus.TAKEN)
+    await order_service.refresh_cards(
+        bot, session, order, manager_name=await _manager_name(session, order)
+    )
+
+    reason_text = f"\nПричина: {html.escape(reason)}" if reason else ""
+    await message.answer(f"❌ Звонок отклонён по заявке #{order.amo_lead_id}.")
+    if order.manager_tg_id:
+        try:
+            await bot.send_message(
+                order.manager_tg_id,
+                f"❌ Запрос на звонок по заявке #{order.amo_lead_id} отклонён.{reason_text}\n"
+                "При необходимости запросите звонок повторно.",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("Не удалось уведомить менеджера об отклонении звонка")
+    logger.info("Звонок по заявке #%s отклонён (причина: %s)", order_id, bool(reason))

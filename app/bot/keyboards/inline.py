@@ -86,3 +86,14 @@ def operator_call_request_keyboard(order_id: int) -> InlineKeyboardMarkup:
     builder.button(text="❌ Отклонить", callback_data=f"reject_call:{order_id}")
     builder.adjust(2)
     return builder.as_markup()
+
+
+def skip_reason_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    """Кнопка «Без причины» при отклонении звонка."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Без причины", callback_data=f"reject_noreason:{order_id}"
+            )
+        ]]
+    )
