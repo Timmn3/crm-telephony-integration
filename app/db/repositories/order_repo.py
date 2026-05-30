@@ -77,8 +77,10 @@ async def try_take(
         logger.info("Заявка id=%s уже занята/не в статусе SENT (manager=%s)",
                     order_id, manager_tg_id)
         return None
-    await session.flush()
     order = await session.get(Order, order_id)
+    if order is not None:
+        # Core-UPDATE не синхронизирует identity-map — перечитываем из БД.
+        await session.refresh(order)
     logger.info("Заявка id=%s взята менеджером tg_id=%s", order_id, manager_tg_id)
     return order
 
