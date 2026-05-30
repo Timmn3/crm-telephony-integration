@@ -18,8 +18,9 @@ from app.bot.filters.role import IsManager
 from app.bot.keyboards.inline import operator_call_request_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.db.models import Order, OrderStatus, User, UserRole
-from app.db.repositories import order_repo, region_repo, user_repo
+from app.db.repositories import call_log_repo, order_repo, region_repo, user_repo
 from app.services import order_service
+from app.services.mango import MangoClient, MangoError
 from app.utils.phone import normalize_phone
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,64 @@ async def request_call(
         reply_markup=operator_call_request_keyboard(order.id),
     )
     logger.info("Менеджер tg_id=%s запросил звонок по заявке #%s", user.tg_id, order_id)
+
+
+# --------------------------------------------------------------------------- #
+# Позвонить клиенту (через Mango)
+# --------------------------------------------------------------------------- #
+
+@router.callback_query(F.data.startswith("make_call:"), IsManager)
+async def make_call(
+    callback: CallbackQuery, user: User, session: AsyncSession, bot: Bot
+) -> None:
+    order_id = int(callback.data.split(":")[1])
+    order = await order_repo.get_by_id(session, order_id)
+    if order is None:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    if order.manager_tg_id != user.tg_id:
+        await callback.answer("Это не ваша заявка.", show_alert=True)
+        return
+    if order.status != OrderStatus.CALL_APPROVED:
+        await callback.answer("Звонок сейчас недоступен. Запросите одобрение.", show_alert=True)
+        return
+    if not user.phone:
+        await callback.answer(
+            "У вас не сохранён номер телефона. Поделитесь контактом через /start.",
+            show_alert=True,
+        )
+        return
+
+    # Инициируем звонок. order.client_phone передаётся только в Mango и не логируется.
+    mango = MangoClient()
+    try:
+        command_id, _result = await mango.initiate_callback(
+            manager_phone=user.phone,
+            client_phone=order.client_phone,
+            order_id=order.id,
+        )
+    except MangoError as exc:
+        await call_log_repo.create(
+            session, order_id=order.id, manager_tg_id=user.tg_id,
+            mango_command_id="", status="error",
+        )
+        logger.error("Ошибка инициации звонка по заявке #%s: %s", order.id, exc)
+        await callback.answer("Не удалось инициировать звонок, попробуйте позже.", show_alert=True)
+        return
+
+    await order_repo.set_status(session, order, OrderStatus.CALL_IN_PROGRESS)
+    await call_log_repo.create(
+        session, order_id=order.id, manager_tg_id=user.tg_id,
+        mango_command_id=command_id, status="initiated",
+    )
+    await order_service.refresh_cards(bot, session, order, manager_name=user.full_name)
+    await callback.answer()
+    await _notify(
+        bot, user.tg_id,
+        "📞 Звонок инициирован. Ожидайте — Mango перезвонит вам на ваш номер, "
+        "а затем соединит с клиентом.",
+    )
+    logger.info("Звонок по заявке #%s инициирован менеджером tg_id=%s", order.id, user.tg_id)
 
 
 # --------------------------------------------------------------------------- #
