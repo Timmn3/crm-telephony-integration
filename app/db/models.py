@@ -150,9 +150,37 @@ class Order(Base):
     call_logs: Mapped[list["CallLog"]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
     )
+    messages: Mapped[list["OrderMessage"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Order id={self.id} amo={self.amo_lead_id} status={self.status}>"
+
+
+class OrderMessage(Base):
+    """Сообщение-карточка заявки, отправленное в конкретный чат.
+
+    Одна заявка при рассылке «всем менеджерам региона» порождает несколько
+    сообщений (по одному в ЛС каждому менеджеру). Храним их, чтобы обновлять
+    карточки у всех адресатов при смене статуса.
+    """
+
+    __tablename__ = "order_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(
+        ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # tg_id менеджера-адресата (для рассылки в ЛС). NULL — если это группа.
+    recipient_tg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    order: Mapped[Order] = relationship(back_populates="messages")
+
+    def __repr__(self) -> str:
+        return f"<OrderMessage order={self.order_id} chat={self.chat_id} msg={self.message_id}>"
 
 
 class CallLog(Base):
