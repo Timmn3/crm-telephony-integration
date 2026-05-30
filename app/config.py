@@ -26,7 +26,8 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------ Telegram
     bot_token: str = Field(..., alias="BOT_TOKEN")
-    admin_tg_ids: list[int] = Field(default_factory=list, alias="ADMIN_TG_IDS")
+    # Храним сырой строкой, чтобы pydantic-settings не пытался JSON-парсить список.
+    admin_tg_ids_raw: str = Field("", alias="ADMIN_TG_IDS")
 
     # ------------------------------------------------------------------ PostgreSQL
     db_host: str = Field("localhost", alias="DB_HOST")
@@ -59,17 +60,21 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ Прочее
     log_level: str = Field("INFO", alias="LOG_LEVEL")
 
-    @field_validator("admin_tg_ids", mode="before")
+    @field_validator("amo_address_field_id", "amo_phone_field_id", mode="before")
     @classmethod
-    def _parse_admin_ids(cls, value: object) -> list[int]:
-        """Парсит список admin id из строки "123,456" или из списка."""
-        if value is None or value == "":
+    def _empty_str_to_none(cls, value: object) -> object:
+        """Пустая строка в .env означает «не задано»."""
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
+
+    @property
+    def admin_tg_ids(self) -> list[int]:
+        """Список Telegram ID администраторов (из строки "123,456")."""
+        raw = self.admin_tg_ids_raw
+        if not raw:
             return []
-        if isinstance(value, str):
-            return [int(part.strip()) for part in value.split(",") if part.strip()]
-        if isinstance(value, (list, tuple)):
-            return [int(part) for part in value]
-        raise ValueError("ADMIN_TG_IDS должен быть строкой с запятыми или списком")
+        return [int(part.strip()) for part in raw.split(",") if part.strip()]
 
     @property
     def database_url(self) -> str:
