@@ -4,14 +4,15 @@ from __future__ import annotations
 import html
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.reply import phone_request_keyboard
+from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.db.models import User, UserRole
 from app.db.repositories import region_repo
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -113,3 +114,25 @@ async def cmd_me(message: Message, user: User | None, session: AsyncSession) -> 
         lines.append(f"Телефон: {'сохранён ✓' if user.phone else 'не указан ✗'}")
 
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    """Отмена текущего пошагового диалога."""
+    if await state.get_state() is None:
+        await message.answer("Сейчас нечего отменять.")
+        return
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=remove_keyboard())
+
+
+@router.callback_query(F.data == "cancel")
+async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отмена по кнопке «Отмена»."""
+    await state.clear()
+    if callback.message:
+        try:
+            await callback.message.edit_text("Действие отменено.")
+        except Exception:  # noqa: BLE001 — сообщение могло устареть
+            pass
+    await callback.answer()
