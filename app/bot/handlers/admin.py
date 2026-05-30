@@ -26,6 +26,7 @@ from app.bot.keyboards.reply import phone_request_keyboard
 from app.bot.states import AddManager, AddOperator, AddRegion, RemoveUser
 from app.db.models import User, UserRole
 from app.db.repositories import region_repo, user_repo
+from app.services.amocrm import AmoCRMClient, AmoCRMError
 
 logger = logging.getLogger(__name__)
 
@@ -335,3 +336,42 @@ async def _deactivate_user(message: Message, identifier: str, session: AsyncSess
     await message.answer(
         f"🚫 Пользователь {html.escape(user.full_name or str(user.tg_id))} деактивирован."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Поля amoCRM
+# --------------------------------------------------------------------------- #
+
+@router.message(Command("amo_fields"), IsAdmin)
+async def amo_fields(message: Message, session: AsyncSession) -> None:
+    """Показывает кастомные поля сделок и контактов amoCRM с их ID.
+
+    Помогает настроить AMO_ADDRESS_FIELD_ID / AMO_PHONE_FIELD_ID в .env.
+    """
+    client = AmoCRMClient(session)
+    try:
+        fields = await client.list_custom_fields()
+    except AmoCRMError as exc:
+        await message.answer(f"❌ Ошибка amoCRM: {html.escape(str(exc))}")
+        return
+    except Exception:  # noqa: BLE001
+        logger.exception("Ошибка при получении полей amoCRM")
+        await message.answer("❌ Не удалось получить поля amoCRM (см. логи).")
+        return
+
+    lines: list[str] = []
+    titles = {"leads": "Поля сделки", "contacts": "Поля контакта"}
+    for entity, title in titles.items():
+        lines.append(f"<b>{title}:</b>")
+        items = fields.get(entity, [])
+        if not items:
+            lines.append("  (нет полей или нет доступа)")
+        for f in items:
+            code = f" code={html.escape(f.code)}" if f.code else ""
+            lines.append(f"  #{f.id} {html.escape(f.name)} [{html.escape(f.field_type)}]{code}")
+        lines.append("")
+
+    text = "\n".join(lines).strip()
+    # Telegram ограничивает длину сообщения ~4096 символов.
+    for chunk_start in range(0, len(text), 3500):
+        await message.answer(text[chunk_start:chunk_start + 3500])
