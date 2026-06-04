@@ -38,7 +38,7 @@ async def create(
     role: UserRole,
     full_name: str = "",
     tg_username: str | None = None,
-    region_id: int | None = None,
+    group_id: int | None = None,
     phone: str | None = None,
     is_active: bool = True,
 ) -> User:
@@ -48,7 +48,7 @@ async def create(
         role=role,
         full_name=full_name,
         tg_username=tg_username,
-        region_id=region_id,
+        group_id=group_id,
         phone=phone,
         is_active=is_active,
     )
@@ -83,10 +83,10 @@ async def set_role(session: AsyncSession, user: User, role: UserRole) -> None:
     logger.info("Пользователь tg_id=%s -> role=%s", user.tg_id, role.value)
 
 
-async def set_region(session: AsyncSession, user: User, region_id: int | None) -> None:
-    user.region_id = region_id
+async def set_group(session: AsyncSession, user: User, group_id: int | None) -> None:
+    user.group_id = group_id
     await session.flush()
-    logger.info("Пользователь tg_id=%s -> region_id=%s", user.tg_id, region_id)
+    logger.info("Пользователь tg_id=%s -> group_id=%s", user.tg_id, group_id)
 
 
 async def set_phone(session: AsyncSession, user: User, phone: str) -> None:
@@ -117,15 +117,26 @@ async def list_all(session: AsyncSession) -> list[User]:
     return list(result.scalars().all())
 
 
-async def list_active_managers_by_region(
-    session: AsyncSession, region_id: int
-) -> list[User]:
-    """Активные менеджеры конкретного региона."""
+async def get_active_manager_by_group(
+    session: AsyncSession, group_id: int
+) -> User | None:
+    """Активный менеджер, назначенный на группу (в группе он максимум один)."""
     result = await session.execute(
         select(User).where(
             User.role == UserRole.MANAGER,
-            User.region_id == region_id,
+            User.group_id == group_id,
             User.is_active.is_(True),
-        ).order_by(User.full_name)
+        ).order_by(User.id)
     )
-    return list(result.scalars().all())
+    return result.scalars().first()
+
+
+async def unassign_from_group(session: AsyncSession, group_id: int) -> User | None:
+    """Отвязывает текущего менеджера группы (group_id=NULL). Возвращает его."""
+    manager = await get_active_manager_by_group(session, group_id)
+    if manager is not None:
+        manager.group_id = None
+        await session.flush()
+        logger.info("Менеджер tg_id=%s отвязан от группы id=%s",
+                    manager.tg_id, group_id)
+    return manager

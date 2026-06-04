@@ -1,20 +1,19 @@
-"""Репозиторий заявок и связанных сообщений."""
+"""Репозиторий заявок."""
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Order, OrderMessage, OrderStatus
+from app.db.models import Order, OrderStatus
 
 logger = logging.getLogger(__name__)
 
 # Статусы, которые считаем «активными» (заявка в работе).
 ACTIVE_STATUSES = (
     OrderStatus.SENT,
-    OrderStatus.TAKEN,
     OrderStatus.CALL_REQUESTED,
     OrderStatus.CALL_APPROVED,
     OrderStatus.CALL_IN_PROGRESS,
@@ -27,62 +26,36 @@ async def create(
     amo_lead_id: int,
     client_name: str,
     client_phone: str,
-    region_id: int,
+    group_id: int,
     operator_tg_id: int,
+    manager_tg_id: int | None,
     client_address: str | None = None,
     comment: str | None = None,
-    status: OrderStatus = OrderStatus.NEW,
+    status: OrderStatus = OrderStatus.SENT,
 ) -> Order:
-    """Создаёт заявку."""
+    """Создаёт заявку. Менеджер берётся из группы в момент отправки."""
     order = Order(
         amo_lead_id=amo_lead_id,
         client_name=client_name,
         client_phone=client_phone,
         client_address=client_address,
         comment=comment,
-        region_id=region_id,
+        group_id=group_id,
         operator_tg_id=operator_tg_id,
+        manager_tg_id=manager_tg_id,
         status=status,
     )
     session.add(order)
     await session.flush()
     logger.info(
-        "Создана заявка id=%s amo=%s region=%s operator=%s",
-        order.id, amo_lead_id, region_id, operator_tg_id,
+        "Создана заявка id=%s amo=%s group=%s operator=%s manager=%s",
+        order.id, amo_lead_id, group_id, operator_tg_id, manager_tg_id,
     )
     return order
 
 
 async def get_by_id(session: AsyncSession, order_id: int) -> Order | None:
     return await session.get(Order, order_id)
-
-
-async def try_take(
-    session: AsyncSession, order_id: int, manager_tg_id: int
-) -> Order | None:
-    """Атомарно «забирает» заявку менеджером.
-
-    Выполняет один UPDATE с условием status=SENT. Если заявку уже взял другой
-    менеджер (status != SENT), UPDATE затронет 0 строк и вернётся None —
-    так решается гонка при рассылке в несколько ЛС одновременно.
-    """
-    result = await session.execute(
-        update(Order)
-        .where(Order.id == order_id, Order.status == OrderStatus.SENT)
-        .values(status=OrderStatus.TAKEN, manager_tg_id=manager_tg_id)
-        .returning(Order.id)
-    )
-    taken_id = result.scalar_one_or_none()
-    if taken_id is None:
-        logger.info("Заявка id=%s уже занята/не в статусе SENT (manager=%s)",
-                    order_id, manager_tg_id)
-        return None
-    order = await session.get(Order, order_id)
-    if order is not None:
-        # Core-UPDATE не синхронизирует identity-map — перечитываем из БД.
-        await session.refresh(order)
-    logger.info("Заявка id=%s взята менеджером tg_id=%s", order_id, manager_tg_id)
-    return order
 
 
 async def set_status(
@@ -104,41 +77,10 @@ async def set_status(
     logger.info("Заявка id=%s -> status=%s", order.id, status.value)
 
 
-async def set_manager(session: AsyncSession, order: Order, manager_tg_id: int | None) -> None:
-    order.manager_tg_id = manager_tg_id
-    await session.flush()
-
-
-async def add_message(
-    session: AsyncSession,
-    order_id: int,
-    chat_id: int,
-    message_id: int,
-    recipient_tg_id: int | None = None,
-) -> OrderMessage:
-    """Сохраняет ссылку на отправленную карточку заявки."""
-    msg = OrderMessage(
-        order_id=order_id,
-        chat_id=chat_id,
-        message_id=message_id,
-        recipient_tg_id=recipient_tg_id,
-    )
-    session.add(msg)
-    await session.flush()
-    return msg
-
-
-async def list_messages(session: AsyncSession, order_id: int) -> list[OrderMessage]:
-    result = await session.execute(
-        select(OrderMessage).where(OrderMessage.order_id == order_id)
-    )
-    return list(result.scalars().all())
-
-
-async def set_primary_message(
+async def set_message(
     session: AsyncSession, order: Order, chat_id: int, message_id: int
 ) -> None:
-    """Запоминает основное сообщение карточки (поля на самой заявке)."""
+    """Запоминает координаты сообщения-карточки в Telegram (для edit)."""
     order.tg_chat_id = chat_id
     order.tg_message_id = message_id
     await session.flush()
