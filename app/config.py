@@ -37,12 +37,14 @@ class Settings(BaseSettings):
     db_password: str = Field("", alias="DB_PASSWORD")
 
     # ------------------------------------------------------------------ amoCRM
+    # OAuth 2.0: токены хранятся в БД (таблица amo_tokens), не в .env.
+    # В .env только реквизиты интеграции и одноразовый код авторизации.
     amocrm_subdomain: str = Field("", alias="AMOCRM_SUBDOMAIN")
-    amocrm_access_token: str = Field("", alias="AMOCRM_ACCESS_TOKEN")
-    amocrm_refresh_token: str = Field("", alias="AMOCRM_REFRESH_TOKEN")
     amocrm_client_id: str = Field("", alias="AMOCRM_CLIENT_ID")
     amocrm_client_secret: str = Field("", alias="AMOCRM_CLIENT_SECRET")
     amocrm_redirect_uri: str = Field("", alias="AMOCRM_REDIRECT_URI")
+    # Одноразовый код авторизации — обменивается на токены при первом запуске.
+    amocrm_auth_code: str = Field("", alias="AMOCRM_AUTH_CODE")
     amo_address_field_id: int | None = Field(None, alias="AMO_ADDRESS_FIELD_ID")
     amo_phone_field_id: int | None = Field(None, alias="AMO_PHONE_FIELD_ID")
 
@@ -99,6 +101,19 @@ class Settings(BaseSettings):
         if subdomain and not subdomain.startswith("http"):
             return f"https://{subdomain}"
         return subdomain
+
+    @property
+    def amocrm_configured(self) -> bool:
+        """True, если заданы реквизиты OAuth-интеграции amoCRM.
+
+        Если False — клиент работает в режиме-заглушке (фейковые данные сделки),
+        что позволяет прогонять весь флоу до получения реальных ключей.
+        """
+        return bool(
+            self.amocrm_subdomain
+            and self.amocrm_client_id
+            and self.amocrm_client_secret
+        )
 
 
 @lru_cache
