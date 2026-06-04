@@ -1,28 +1,37 @@
-"""Клиент amoCRM API.
+"""Клиент amoCRM API (OAuth 2.0).
 
-Поддерживает два режима авторизации одновременно:
-- long-lived access_token из .env (AMOCRM_ACCESS_TOKEN);
-- OAuth 2.0 с автообновлением по refresh_token (токены хранятся в таблице
-  settings и при обновлении перезаписываются там же).
+Авторизация:
+- одноразовый код (AMOCRM_AUTH_CODE) обменивается на access/refresh при первом
+  запуске (см. exchange_code / ensure_token в main.py);
+- access_token обновляется по refresh_token, когда до истечения < 5 минут;
+- токены хранятся в БД (таблица amo_tokens), а не в .env.
 
-При ответе 401 клиент пытается обновить токен по refresh_token и повторяет запрос.
+Режим-заглушка: если реквизиты интеграции не заданы (settings.amocrm_configured
+== False), get_order_data возвращает синтетического клиента с тестовым телефоном.
+Это позволяет прогонять весь флоу (вплоть до звонка Mango) до получения ключей.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db.repositories import settings_repo
+from app.db.repositories import amo_token_repo
 from app.utils.phone import normalize_phone
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 PHONE_FIELD_CODE = "PHONE"
+# За сколько до истечения access_token обновляем его заранее.
+_REFRESH_MARGIN = timedelta(minutes=5)
+
+# Данные синтетического клиента в режиме-заглушке.
+_STUB_PHONE = "79991234567"
 
 
 # --------------------------------------------------------------------------- #
@@ -34,7 +43,7 @@ class AmoCRMError(Exception):
 
 
 class AmoAuthError(AmoCRMError):
-    """Проблема авторизации (токен истёк и не удалось обновить)."""
+    """Проблема авторизации (нет токена / refresh не удался)."""
 
 
 class LeadNotFound(AmoCRMError):
@@ -82,44 +91,87 @@ class AmoCRMClient:
         self.settings = get_settings()
         self.base_url = self.settings.amocrm_base_url.rstrip("/")
 
+    @property
+    def is_stub(self) -> bool:
+        """True — работаем в режиме-заглушке (реквизиты amoCRM не заданы)."""
+        return not self.settings.amocrm_configured
+
     # ---------------------------------------------------------------- токены
-    async def _get_access_token(self) -> str:
-        token = await settings_repo.get(self.db, settings_repo.AMOCRM_ACCESS_TOKEN)
-        return token or self.settings.amocrm_access_token
+    async def exchange_code(self, code: str, http: aiohttp.ClientSession | None = None) -> None:
+        """Обменивает одноразовый код авторизации на access/refresh токены."""
+        payload = {
+            "client_id": self.settings.amocrm_client_id,
+            "client_secret": self.settings.amocrm_client_secret,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.settings.amocrm_redirect_uri,
+        }
+        await self._request_token(payload, http)
+        logger.info("Код авторизации amoCRM обменян на токены")
 
-    async def _get_refresh_token(self) -> str:
-        token = await settings_repo.get(self.db, settings_repo.AMOCRM_REFRESH_TOKEN)
-        return token or self.settings.amocrm_refresh_token
-
-    async def _refresh_access_token(self, http: aiohttp.ClientSession) -> str:
-        """Обновляет access_token по refresh_token и сохраняет оба в БД."""
-        refresh_token = await self._get_refresh_token()
-        if not (refresh_token and self.settings.amocrm_client_id
-                and self.settings.amocrm_client_secret):
+    async def _refresh(self, http: aiohttp.ClientSession) -> str:
+        """Обновляет access_token по refresh_token, сохраняет в БД."""
+        token = await amo_token_repo.get(self.db)
+        if token is None or not token.refresh_token:
             raise AmoAuthError(
-                "Токен amoCRM истёк, а данных для обновления (refresh_token / "
-                "client_id / client_secret) недостаточно."
+                "Нет refresh_token amoCRM. Выполните первичную авторизацию "
+                "(AMOCRM_AUTH_CODE) или обновите код командой /set_amo_code."
             )
-
         payload = {
             "client_id": self.settings.amocrm_client_id,
             "client_secret": self.settings.amocrm_client_secret,
             "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
+            "refresh_token": token.refresh_token,
             "redirect_uri": self.settings.amocrm_redirect_uri,
         }
-        url = f"{self.base_url}/oauth2/access_token"
-        async with http.post(url, json=payload) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                logger.error("Ошибка обновления токена amoCRM: %s %s", resp.status, text)
-                raise AmoAuthError("Не удалось обновить токен amoCRM.")
-            data = await resp.json()
+        return await self._request_token(payload, http)
 
-        await settings_repo.set_value(self.db, settings_repo.AMOCRM_ACCESS_TOKEN, data["access_token"])
-        await settings_repo.set_value(self.db, settings_repo.AMOCRM_REFRESH_TOKEN, data["refresh_token"])
-        logger.info("access_token amoCRM успешно обновлён")
+    async def _request_token(
+        self, payload: dict, http: aiohttp.ClientSession | None
+    ) -> str:
+        """Запрашивает токены у amoCRM и сохраняет их в БД. Возвращает access."""
+        if not self.base_url:
+            raise AmoAuthError("Не задан поддомен amoCRM (AMOCRM_SUBDOMAIN).")
+        url = f"{self.base_url}/oauth2/access_token"
+        own_http = http is None
+        http = http or aiohttp.ClientSession(timeout=_TIMEOUT)
+        try:
+            async with http.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.error("amoCRM oauth2 -> %s %s", resp.status, text)
+                    raise AmoAuthError(
+                        "Не удалось получить токен amoCRM "
+                        f"(HTTP {resp.status}). Код/refresh мог истечь."
+                    )
+                data = await resp.json()
+        finally:
+            if own_http:
+                await http.close()
+
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=int(data.get("expires_in", 0))
+        )
+        await amo_token_repo.save(
+            self.db,
+            access_token=data["access_token"],
+            refresh_token=data["refresh_token"],
+            expires_at=expires_at,
+        )
         return data["access_token"]
+
+    async def _get_access_token(self, http: aiohttp.ClientSession) -> str:
+        """Возвращает валидный access_token, при необходимости обновив его."""
+        token = await amo_token_repo.get(self.db)
+        if token is None:
+            raise AmoAuthError(
+                "amoCRM не авторизован. Задайте AMOCRM_AUTH_CODE и перезапустите "
+                "бота либо примените код командой /set_amo_code."
+            )
+        if token.expires_at <= datetime.now(timezone.utc) + _REFRESH_MARGIN:
+            logger.info("access_token amoCRM скоро истечёт — обновляем заранее")
+            return await self._refresh(http)
+        return token.access_token
 
     # ---------------------------------------------------------------- запросы
     async def _get(
@@ -130,16 +182,14 @@ class AmoCRMClient:
             raise AmoCRMError("Не задан поддомен amoCRM (AMOCRM_SUBDOMAIN).")
 
         url = f"{self.base_url}{path}"
-        token = await self._get_access_token()
-        if not token:
-            raise AmoAuthError("Не задан access_token amoCRM.")
+        token = await self._get_access_token(http)
 
         for attempt in (1, 2):
             headers = {"Authorization": f"Bearer {token}"}
             async with http.get(url, headers=headers) as resp:
                 if resp.status == 401 and attempt == 1:
                     logger.info("amoCRM вернул 401, пробуем обновить токен")
-                    token = await self._refresh_access_token(http)
+                    token = await self._refresh(http)
                     continue
                 if resp.status == 204:
                     return None
@@ -158,7 +208,20 @@ class AmoCRMClient:
 
     # ---------------------------------------------------------------- API
     async def get_order_data(self, lead_id: int) -> OrderData:
-        """Загружает сделку и связанный контакт, собирает данные заявки."""
+        """Загружает сделку и связанный контакт, собирает данные заявки.
+
+        В режиме-заглушке возвращает синтетического клиента.
+        """
+        if self.is_stub:
+            logger.info("[amoCRM STUB] возвращаю тестовые данные по сделке #%s", lead_id)
+            return OrderData(
+                amo_lead_id=lead_id,
+                client_name=f"Тестовый Клиент #{lead_id}",
+                client_phone=_STUB_PHONE,
+                client_address="г. Москва, ул. Тестовая, 1",
+                comment="Тестовая заявка (amoCRM не настроен)",
+            )
+
         async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
             lead = await self._get(http, f"/api/v4/leads/{lead_id}?with=contacts")
             if lead is None:
@@ -201,6 +264,11 @@ class AmoCRMClient:
 
     async def list_custom_fields(self) -> dict[str, list[CustomFieldInfo]]:
         """Возвращает кастомные поля сделок и контактов (для /amo_fields)."""
+        if self.is_stub:
+            raise AmoCRMError(
+                "amoCRM не настроен (режим-заглушка). Поля недоступны, пока не "
+                "заданы реквизиты интеграции и не выполнена авторизация."
+            )
         result: dict[str, list[CustomFieldInfo]] = {"leads": [], "contacts": []}
         async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
             for entity in ("leads", "contacts"):
