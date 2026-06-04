@@ -45,6 +45,19 @@ async def list_all(session: AsyncSession) -> list[Group]:
     return list(result.scalars().all())
 
 
+async def update(
+    session: AsyncSession, group: Group,
+    name: str | None = None, city: str | None = None,
+) -> Group:
+    if name is not None:
+        group.name = name.strip()
+    if city is not None:
+        group.city = city.strip()
+    await session.flush()
+    logger.info("Группа id=%s обновлена name=%r city=%r", group.id, group.name, group.city)
+    return group
+
+
 async def set_active(session: AsyncSession, group: Group, active: bool) -> None:
     group.is_active = active
     await session.flush()

@@ -74,6 +74,15 @@ def skip_comment_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def edit_group_field_keyboard() -> InlineKeyboardMarkup:
+    """Выбор поля для редактирования группы."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Название", callback_data="egfield:name")],
+        [InlineKeyboardButton(text="🏙 Город",    callback_data="egfield:city")],
+        [InlineKeyboardButton(text="❌ Отмена",   callback_data="egfield:cancel")],
+    ])
+
+
 def cancel_keyboard(callback_data: str = "cancel") -> InlineKeyboardMarkup:
     """Кнопка отмены."""
     return InlineKeyboardMarkup(

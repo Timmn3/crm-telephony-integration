@@ -8,8 +8,9 @@ import uvicorn
 
 from app.api.webhooks import app as fastapi_app
 from app.bot.bot import create_bot, create_dispatcher
+from app.bot.commands import setup_all_commands
 from app.config import get_settings
-from app.db.database import dispose_engine, init_db
+from app.db.database import async_session_factory, dispose_engine, init_db
 from app.logging_config import setup_logging
 from app.services.bootstrap import ensure_amo_token, seed_groups
 
@@ -26,6 +27,9 @@ async def main() -> None:
 
     bot = create_bot()
     dp = create_dispatcher()
+
+    async with async_session_factory() as session:
+        await setup_all_commands(bot, session)
 
     uvicorn_config = uvicorn.Config(
         fastapi_app,

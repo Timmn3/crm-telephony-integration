@@ -20,6 +20,12 @@ class AddGroup(StatesGroup):
     waiting_city = State()
 
 
+class EditGroup(StatesGroup):
+    waiting_group = State()   # выбор группы из инлайн-кнопок
+    waiting_field = State()   # выбор поля: name / city
+    waiting_value = State()   # ввод нового значения
+
+
 class RemoveUser(StatesGroup):
     waiting_identifier = State()
 

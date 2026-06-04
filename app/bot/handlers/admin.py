@@ -20,15 +20,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.commands import set_commands_for_user
 from app.bot.filters.role import IsAdmin
 from app.bot.keyboards.inline import (
     cancel_keyboard,
     confirm_replace_keyboard,
+    edit_group_field_keyboard,
     groups_keyboard,
     registration_keyboard,
 )
 from app.bot.keyboards.reply import phone_request_keyboard
-from app.bot.states import AddGroup, AddManager, AddOperator, RemoveUser, SetAmoCode
+from app.bot.states import AddGroup, AddManager, AddOperator, EditGroup, RemoveUser, SetAmoCode
 from app.db.models import User, UserRole
 from app.db.repositories import group_repo, pending_repo, user_repo
 from app.services.amocrm import AmoCRMClient, AmoCRMError
@@ -148,7 +150,7 @@ async def list_groups(message: Message, session: AsyncSession) -> None:
         await message.answer("Групп пока нет. Создайте: /add_group <название> <город>")
         return
     lines = ["<b>Группы:</b>"]
-    for g in groups:
+    for g in sorted(groups, key=lambda x: x.id):
         mark = "✅" if g.is_active else "🚫"
         manager = await user_repo.get_active_manager_by_group(session, g.id)
         who = "свободна"
@@ -161,6 +163,90 @@ async def list_groups(message: Message, session: AsyncSession) -> None:
             f"({html.escape(g.city or '—')}) — {html.escape(who)}"
         )
     await message.answer("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# Редактирование группы
+# --------------------------------------------------------------------------- #
+
+@router.message(Command("edit_group"), IsAdmin)
+async def edit_group_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    groups = await group_repo.list_all(session)
+    if not groups:
+        await message.answer("Групп пока нет. Создайте: /add_group")
+        return
+    await state.set_state(EditGroup.waiting_group)
+    await message.answer(
+        "Выберите группу для редактирования:",
+        reply_markup=groups_keyboard(sorted(groups, key=lambda g: g.id), prefix="admin_edit_group"),
+    )
+
+
+@router.callback_query(EditGroup.waiting_group, F.data.startswith("admin_edit_group:"))
+async def edit_group_pick(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    group_id = int(callback.data.split(":")[1])
+    group = await group_repo.get_by_id(session, group_id)
+    if group is None:
+        await state.clear()
+        await callback.message.edit_text("❌ Группа не найдена.")
+        await callback.answer()
+        return
+    await state.update_data(edit_group_id=group_id)
+    await state.set_state(EditGroup.waiting_field)
+    await callback.message.edit_text(
+        f"Группа <b>{html.escape(group.name)}</b> (город: {html.escape(group.city or '—')}).\n"
+        "Что изменить?",
+        reply_markup=edit_group_field_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(EditGroup.waiting_field, F.data.startswith("egfield:"))
+async def edit_group_field(callback: CallbackQuery, state: FSMContext) -> None:
+    field = callback.data.split(":")[1]
+    if field == "cancel":
+        await state.clear()
+        await callback.message.edit_text("Отменено.")
+        await callback.answer()
+        return
+    await state.update_data(edit_field=field)
+    await state.set_state(EditGroup.waiting_value)
+    prompt = "Введите новое название группы:" if field == "name" else "Введите новый город:"
+    await callback.message.edit_text(prompt, reply_markup=cancel_keyboard())
+    await callback.answer()
+
+
+@router.message(EditGroup.waiting_value)
+async def edit_group_value(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    group_id = data.get("edit_group_id")
+    field = data.get("edit_field")
+    new_value = (message.text or "").strip()
+
+    if not new_value:
+        await message.answer("Значение не может быть пустым. Введите снова или /cancel.")
+        return
+
+    group = await group_repo.get_by_id(session, group_id)
+    if group is None:
+        await state.clear()
+        await message.answer("❌ Группа не найдена.")
+        return
+
+    if field == "name":
+        existing = await group_repo.get_by_name(session, new_value)
+        if existing is not None and existing.id != group.id:
+            await message.answer(f"❌ Группа с названием «{html.escape(new_value)}» уже существует.")
+            return
+        await group_repo.update(session, group, name=new_value)
+        await state.clear()
+        await message.answer(f"✅ Название группы #{group.id} изменено на «{html.escape(group.name)}».")
+    else:
+        await group_repo.update(session, group, city=new_value)
+        await state.clear()
+        await message.answer(
+            f"✅ Город группы «{html.escape(group.name)}» изменён на «{html.escape(group.city)}»."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -254,6 +340,7 @@ async def _assign_operator(
 
     gname = html.escape(group.name)
     await message.edit_text(f"✅ Оператор добавлен (tg_id={tg_id}), группа: {gname}.")
+    await set_commands_for_user(bot, tg_id, UserRole.OPERATOR)
     delivered = await _notify_new_user(
         bot, tg_id,
         "✅ Вам выдан доступ <b>оператора</b>. Отправьте /start, чтобы начать работу.",
@@ -426,6 +513,7 @@ async def _assign_manager(
         group_label = f"группа: {group_id}"
     await message.edit_text(f"✅ Менеджер добавлен (tg_id={tg_id}), {group_label}.")
 
+    await set_commands_for_user(bot, tg_id, UserRole.MANAGER)
     text = (
         f"✅ Вас назначили выездным менеджером, {group_label}.\n\n"
     )

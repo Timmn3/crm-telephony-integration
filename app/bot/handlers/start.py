@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.types import User as TgUser
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.commands import set_commands_for_user
 from app.bot.keyboards.inline import registration_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.config import get_settings
@@ -136,6 +137,7 @@ async def cmd_start(
         )
         return
 
+    await set_commands_for_user(bot, user.tg_id, user.role)
     await message.answer(
         f"👋 Здравствуйте, {name}!\n"
         f"Ваша роль: <b>{title}</b>.\n\n"
