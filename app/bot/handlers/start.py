@@ -4,25 +4,78 @@ from __future__ import annotations
 import html
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from aiogram.types import User as TgUser
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.keyboards.inline import registration_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
+from app.config import get_settings
 from app.db.models import User, UserRole
-from app.db.repositories import group_repo
+from app.db.repositories import group_repo, pending_repo
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="start")
+
+_settings = get_settings()
 
 NOT_REGISTERED = (
     "👋 Здравствуйте!\n\n"
     "Вы пока не зарегистрированы в системе. "
     "Обратитесь к администратору для получения доступа."
 )
+
+
+def _unregistered_text(tg_user: TgUser | None) -> str:
+    """Текст для незнакомца: показываем его ID для передачи администратору."""
+    if tg_user is None:
+        return NOT_REGISTERED
+    return (
+        "👋 Здравствуйте!\n\n"
+        "Вы пока не зарегистрированы в системе.\n"
+        f"Ваш Telegram ID: <code>{tg_user.id}</code>\n\n"
+        "Передайте этот ID администратору для получения доступа. "
+        "Администратор уже уведомлён о вашем обращении."
+    )
+
+
+async def _notify_admins_new_user(
+    bot: Bot, session: AsyncSession, tg_user: TgUser
+) -> None:
+    """Шлёт админам карточку нового обращения с кнопками назначения роли.
+
+    Дедуп через БД: если запись об обращении уже есть (pending_users), значит
+    админы уже уведомлены — повторно не шлём (переживает рестарт бота).
+    """
+    if await pending_repo.get(session, tg_user.id) is not None:
+        return
+    await pending_repo.add(
+        session,
+        tg_id=tg_user.id,
+        full_name=tg_user.full_name or "",
+        tg_username=tg_user.username,
+    )
+
+    name = html.escape(tg_user.full_name or "—")
+    uname = f"@{html.escape(tg_user.username)}" if tg_user.username else "—"
+    text = (
+        "🆕 <b>Новое обращение к боту</b>\n\n"
+        f"Имя: {name}\n"
+        f"Username: {uname}\n"
+        f"Telegram ID: <code>{tg_user.id}</code>\n\n"
+        "Назначить роль?"
+    )
+    keyboard = registration_keyboard(tg_user.id)
+    for admin_id in _settings.admin_tg_ids:
+        try:
+            await bot.send_message(admin_id, text, reply_markup=keyboard)
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            logger.warning("Не удалось уведомить админа %s о новом обращении: %s", admin_id, exc)
 
 ROLE_TITLES = {
     UserRole.ADMIN: "администратор",
@@ -37,6 +90,7 @@ HELP_BY_ROLE = {
         "/add_manager — добавить менеджера (с привязкой к группе)\n"
         "/add_group — создать группу\n"
         "/groups — список групп и их менеджеров\n"
+        "/pending — необработанные обращения\n"
         "/users — список пользователей\n"
         "/remove_user — деактивировать пользователя\n"
         "/amo_fields — показать поля сделки/контакта amoCRM\n"
@@ -58,10 +112,15 @@ HELP_BY_ROLE = {
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, user: User | None) -> None:
+async def cmd_start(
+    message: Message, user: User | None, bot: Bot, session: AsyncSession
+) -> None:
     """Приветствие в зависимости от роли (или подсказка для незнакомца)."""
     if user is None or not user.is_active:
-        await message.answer(NOT_REGISTERED)
+        await message.answer(_unregistered_text(message.from_user))
+        # Уведомляем админов только о действительно новых (не о деактивированных).
+        if user is None and message.from_user is not None:
+            await _notify_admins_new_user(bot, session, message.from_user)
         return
 
     name = html.escape(user.full_name or (message.from_user.full_name if message.from_user else ""))
@@ -111,8 +170,8 @@ async def cmd_me(message: Message, user: User | None, session: AsyncSession) -> 
     if user.group_id:
         group = await group_repo.get_by_id(session, user.group_id)
         if group:
-            city = f", {html.escape(group.city)}" if group.city else ""
-            lines.append(f"Группа: {html.escape(group.name)}{city}")
+            group_label = f"город: {html.escape(group.city)}, группа: {group.id}" if group.city else f"группа: {group.id}"
+            lines.append(f"Группа: {group_label}")
         else:
             lines.append("Группа: —")
     if user.role == UserRole.MANAGER:

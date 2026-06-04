@@ -186,6 +186,30 @@ class CallLog(Base):
         return f"<CallLog id={self.id} order={self.order_id} status={self.status}>"
 
 
+class PendingUser(Base):
+    """Обращение незарегистрированного пользователя, ожидающее назначения роли.
+
+    Создаётся при первом /start незнакомца и служит «флагом» того, что админы
+    уже уведомлены: пока строка существует, повторные /start не дублируют
+    уведомления. Удаляется, когда пользователю назначена роль (или его пропустили).
+    """
+
+    __tablename__ = "pending_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tg_id: Mapped[int] = mapped_column(
+        BigInteger, unique=True, index=True, nullable=False
+    )
+    tg_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<PendingUser id={self.id} tg_id={self.tg_id}>"
+
+
 class AmoToken(Base):
     """OAuth-токены amoCRM (всегда одна запись).
 

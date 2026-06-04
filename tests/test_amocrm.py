@@ -41,7 +41,9 @@ async def test_stub_mode_returns_fake_client(session):
     assert client.is_stub is True
     data = await client.get_order_data(424242)
     assert data.amo_lead_id == 424242
-    assert data.client_phone == "79991234567"
+    # Телефон-заглушка берётся из настроек (AMOCRM_STUB_PHONE).
+    assert data.client_phone == get_settings().amocrm_stub_phone
+    assert data.client_phone  # не пустой
     assert "Тестовый" in data.client_name
 
 

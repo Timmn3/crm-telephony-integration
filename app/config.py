@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     amocrm_auth_code: str = Field("", alias="AMOCRM_AUTH_CODE")
     amo_address_field_id: int | None = Field(None, alias="AMO_ADDRESS_FIELD_ID")
     amo_phone_field_id: int | None = Field(None, alias="AMO_PHONE_FIELD_ID")
+    # Телефон синтетического клиента в режиме-заглушке (для отладки звонка).
+    amocrm_stub_phone: str = Field("79991234567", alias="AMOCRM_STUB_PHONE")
 
     # ------------------------------------------------------------------ Mango Office
     mango_api_key: str = Field("", alias="MANGO_API_KEY")

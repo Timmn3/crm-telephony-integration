@@ -21,11 +21,16 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters.role import IsAdmin
-from app.bot.keyboards.inline import cancel_keyboard, confirm_replace_keyboard, groups_keyboard
+from app.bot.keyboards.inline import (
+    cancel_keyboard,
+    confirm_replace_keyboard,
+    groups_keyboard,
+    registration_keyboard,
+)
 from app.bot.keyboards.reply import phone_request_keyboard
 from app.bot.states import AddGroup, AddManager, AddOperator, RemoveUser, SetAmoCode
 from app.db.models import User, UserRole
-from app.db.repositories import group_repo, user_repo
+from app.db.repositories import group_repo, pending_repo, user_repo
 from app.services.amocrm import AmoCRMClient, AmoCRMError
 
 logger = logging.getLogger(__name__)
@@ -168,8 +173,7 @@ async def add_operator_start(
     session: AsyncSession, bot: Bot,
 ) -> None:
     if command.args:
-        await state.clear()
-        await _create_operator(message, command.args.strip(), session, bot)
+        await _resolve_operator_target(message, command.args.strip(), state, session)
         return
     await state.set_state(AddOperator.waiting_tg_id)
     await message.answer(
@@ -185,26 +189,71 @@ async def add_operator_id(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     await state.clear()
-    await _create_operator(message, (message.text or "").strip(), session, bot)
+    await _resolve_operator_target(message, (message.text or "").strip(), state, session)
 
 
-async def _create_operator(
-    message: Message, identifier: str, session: AsyncSession, bot: Bot
+async def _resolve_operator_target(
+    message: Message, identifier: str, state: FSMContext, session: AsyncSession
 ) -> None:
     user, tg_id, error = await _resolve_target(session, identifier)
     if error:
         await message.answer(f"❌ {error}")
+        await state.clear()
+        return
+    await _offer_operator_groups(message, state, session, tg_id=tg_id)
+
+
+async def _offer_operator_groups(
+    message: Message, state: FSMContext, session: AsyncSession, *, tg_id: int
+) -> None:
+    groups = await group_repo.list_active(session)
+    if not groups:
+        await message.answer("Сначала создайте хотя бы одну группу: /add_group <название> <город>")
+        await state.clear()
+        return
+    await state.update_data(operator_tg_id=tg_id)
+    await state.set_state(AddOperator.waiting_group)
+    await message.answer(
+        "Выберите группу для оператора:",
+        reply_markup=groups_keyboard(groups, prefix="admin_op_group"),
+    )
+
+
+@router.callback_query(AddOperator.waiting_group, F.data.startswith("admin_op_group:"))
+async def add_operator_group(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    group_id = int(callback.data.split(":")[1])
+    group = await group_repo.get_by_id(session, group_id)
+    data = await state.get_data()
+    tg_id = data.get("operator_tg_id")
+    await state.clear()
+
+    if group is None or tg_id is None:
+        await callback.message.edit_text("❌ Ошибка: данные не найдены.")
+        await callback.answer()
         return
 
+    await _assign_operator(callback.message, session, bot, tg_id, group)
+    await callback.answer()
+
+
+async def _assign_operator(
+    message: Message, session: AsyncSession, bot: Bot, tg_id: int, group
+) -> None:
+    user = await user_repo.get_by_tg_id(session, tg_id)
     if user is not None:
         await user_repo.set_role(session, user, UserRole.OPERATOR)
+        await user_repo.set_group(session, user, group.id)
         await user_repo.set_active(session, user, True)
     else:
-        user = await user_repo.create(
-            session, tg_id=tg_id, role=UserRole.OPERATOR, full_name=""
+        await user_repo.create(
+            session, tg_id=tg_id, role=UserRole.OPERATOR, full_name="", group_id=group.id
         )
+    await pending_repo.delete(session, tg_id)
 
-    await message.answer(f"✅ Оператор добавлен (tg_id={tg_id}).")
+    gname = html.escape(group.name)
+    await message.edit_text(f"✅ Оператор добавлен (tg_id={tg_id}), группа: {gname}.")
     delivered = await _notify_new_user(
         bot, tg_id,
         "✅ Вам выдан доступ <b>оператора</b>. Отправьте /start, чтобы начать работу.",
@@ -368,14 +417,17 @@ async def _assign_manager(
             session, tg_id=tg_id, role=UserRole.MANAGER,
             full_name=full_name, tg_username=username, group_id=group_id,
         )
+    await pending_repo.delete(session, tg_id)
 
-    gname = html.escape(group.name) if group else str(group_id)
     has_phone = bool(user.phone)
-    await message.edit_text(f"✅ Менеджер добавлен (tg_id={tg_id}), группа: {gname}.")
+    if group:
+        group_label = f"город: {html.escape(group.city)}, группа: {group.id}" if group.city else f"группа: {group.id}"
+    else:
+        group_label = f"группа: {group_id}"
+    await message.edit_text(f"✅ Менеджер добавлен (tg_id={tg_id}), {group_label}.")
 
     text = (
-        f"✅ Вас назначили выездным менеджером, группа: <b>{gname}</b>"
-        f"{(', ' + html.escape(group.city)) if group and group.city else ''}.\n\n"
+        f"✅ Вас назначили выездным менеджером, {group_label}.\n\n"
     )
     if has_phone:
         text += "Телефон уже сохранён — можно принимать заявки."
@@ -389,6 +441,80 @@ async def _assign_manager(
             "⚠️ Не удалось отправить уведомление менеджеру — он ещё не писал боту. "
             "Попросите его написать /start: после этого бот попросит номер телефона."
         )
+
+
+# --------------------------------------------------------------------------- #
+# Быстрое назначение роли из уведомления о новом обращении (/start незнакомца)
+# --------------------------------------------------------------------------- #
+
+@router.callback_query(F.data.startswith("reg_op:"), IsAdmin)
+async def reg_assign_operator(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Кнопка «Оператор» в карточке нового обращения — запускаем выбор группы."""
+    tg_id = int(callback.data.split(":")[1])
+    if callback.message:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await _offer_operator_groups(callback.message, state, session, tg_id=tg_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("reg_mgr:"), IsAdmin)
+async def reg_assign_manager(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Кнопка «Менеджер» — запускаем выбор группы (далее штатный флоу AddManager)."""
+    tg_id = int(callback.data.split(":")[1])
+    existing = await user_repo.get_by_tg_id(session, tg_id)
+    if callback.message:
+        # Убираем кнопки уведомления, чтобы не нажали повторно.
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await _offer_groups(
+            callback.message, state, session,
+            tg_id=tg_id,
+            full_name=existing.full_name if existing else "",
+            username=existing.tg_username if existing else None,
+            existing=existing,
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("reg_ignore:"), IsAdmin)
+async def reg_ignore(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Кнопка «Пропустить» — убираем карточку и обращение из очереди."""
+    tg_id = int(callback.data.split(":")[1])
+    await pending_repo.delete(session, tg_id)
+    if callback.message:
+        await callback.message.edit_text(
+            "Обращение пропущено. Назначить роль позже: /add_operator или /add_manager."
+        )
+    await callback.answer()
+
+
+@router.message(Command("pending"), IsAdmin)
+async def list_pending(message: Message, session: AsyncSession) -> None:
+    """Список необработанных обращений с кнопками назначения роли."""
+    pending = await pending_repo.list_all(session)
+    if not pending:
+        await message.answer("Очередь обращений пуста.")
+        return
+    await message.answer(f"<b>Ожидают назначения роли: {len(pending)}</b>")
+    for p in pending:
+        name = html.escape(p.full_name or "—")
+        uname = f"@{html.escape(p.tg_username)}" if p.tg_username else "—"
+        text = (
+            "🆕 <b>Обращение</b>\n"
+            f"Имя: {name}\n"
+            f"Username: {uname}\n"
+            f"Telegram ID: <code>{p.tg_id}</code>"
+        )
+        await message.answer(text, reply_markup=registration_keyboard(p.tg_id))
 
 
 # --------------------------------------------------------------------------- #

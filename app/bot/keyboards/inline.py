@@ -43,6 +43,19 @@ def groups_select_keyboard(
     return builder.as_markup()
 
 
+def registration_keyboard(tg_id: int) -> InlineKeyboardMarkup:
+    """Кнопки назначения роли в уведомлении админу о новом обращении.
+
+    callback_data: ``reg_op:{tg_id}`` / ``reg_mgr:{tg_id}`` / ``reg_ignore:{tg_id}``.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👔 Оператор", callback_data=f"reg_op:{tg_id}")
+    builder.button(text="🚗 Менеджер", callback_data=f"reg_mgr:{tg_id}")
+    builder.button(text="🚫 Пропустить", callback_data=f"reg_ignore:{tg_id}")
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+
 def confirm_replace_keyboard(user_id: int, group_id: int) -> InlineKeyboardMarkup:
     """Подтверждение замены менеджера в занятой группе."""
     builder = InlineKeyboardBuilder()

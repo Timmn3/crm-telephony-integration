@@ -30,9 +30,6 @@ PHONE_FIELD_CODE = "PHONE"
 # За сколько до истечения access_token обновляем его заранее.
 _REFRESH_MARGIN = timedelta(minutes=5)
 
-# Данные синтетического клиента в режиме-заглушке.
-_STUB_PHONE = "79991234567"
-
 
 # --------------------------------------------------------------------------- #
 # Исключения
@@ -217,7 +214,7 @@ class AmoCRMClient:
             return OrderData(
                 amo_lead_id=lead_id,
                 client_name=f"Тестовый Клиент #{lead_id}",
-                client_phone=_STUB_PHONE,
+                client_phone=self.settings.amocrm_stub_phone,
                 client_address="г. Москва, ул. Тестовая, 1",
                 comment="Тестовая заявка (amoCRM не настроен)",
             )

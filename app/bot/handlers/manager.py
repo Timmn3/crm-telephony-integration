@@ -75,8 +75,8 @@ async def on_contact(message: Message, user: User | None, session: AsyncSession)
     if user.group_id:
         group = await group_repo.get_by_id(session, user.group_id)
         if group:
-            city = f", {html.escape(group.city)}" if group.city else ""
-            group_line = f"\nГруппа: <b>{html.escape(group.name)}</b>{city}."
+            group_label = f"город: <b>{html.escape(group.city)}</b>, группа: {group.id}" if group.city else f"группа: {group.id}"
+            group_line = f"\n{group_label}."
 
     await message.answer(
         "✅ Готово! Вы зарегистрированы как выездной менеджер." + group_line +
