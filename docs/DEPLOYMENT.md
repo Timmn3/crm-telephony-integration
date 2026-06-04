@@ -24,26 +24,31 @@
    просто запустите бота `/start` после первого деплоя — он покажет ID.
    Это значение пойдёт в `ADMIN_TG_IDS`.
 
-### 2.2. amoCRM
+### 2.2. amoCRM (OAuth 2.0)
 
-Возможны два режима (бот поддерживает оба):
+> **Можно отложить.** Пока реквизиты amoCRM не заданы, бот работает в
+> **режиме-заглушке** (см. ниже) — всё остальное (Telegram, Mango, группы)
+> работает уже сейчас. amoCRM подключается, когда появятся ключи.
 
-**A. Долгоживущий токен (проще).**
-В amoCRM: «Настройки» → «Интеграции» → создайте приватную интеграцию → во вкладке
-«Ключи и доступы» получите долгоживущий токен. Положите его в `AMOCRM_ACCESS_TOKEN`.
+В amoCRM: «Настройки» → «Интеграции» → создайте приватную интеграцию. Получите
+`client_id`, `client_secret`, задайте `redirect_uri`. Затем сгенерируйте
+**код авторизации** (одноразовый). Заполните в `.env`:
 
-**B. OAuth 2.0 с автообновлением (надёжнее на длинной дистанции).**
-При создании интеграции получите `client_id`, `client_secret`, `redirect_uri`.
-По коду авторизации обменяйте на `access_token` + `refresh_token` (см.
-официальную документацию amoCRM по OAuth 2.0). Заполните `AMOCRM_CLIENT_ID`,
-`AMOCRM_CLIENT_SECRET`, `AMOCRM_REDIRECT_URI`, `AMOCRM_ACCESS_TOKEN`,
-`AMOCRM_REFRESH_TOKEN`. Бот сам обновит access-токен по refresh при истечении и
-сохранит новые значения в БД.
+- `AMOCRM_SUBDOMAIN` — поддомен аккаунта, например `mycompany.amocrm.ru`;
+- `AMOCRM_CLIENT_ID`, `AMOCRM_CLIENT_SECRET`, `AMOCRM_REDIRECT_URI`;
+- `AMOCRM_AUTH_CODE` — одноразовый код авторизации.
+
+При первом запуске бот обменяет код на `access_token` + `refresh_token` и сохранит
+их **в БД** (таблица `amo_tokens`). Дальше токены обновляются автоматически по
+refresh. Когда refresh-токен истечёт (долго не было запросов) — получите новый код
+в интеграции и примените командой в боте: `/set_amo_code <code>` (от админа).
 
 > Точные шаги в интерфейсе amoCRM меняются — сверяйтесь с актуальной
 > [документацией amoCRM](https://www.amocrm.ru/developers/content/oauth/step-by-step).
 
-`AMOCRM_SUBDOMAIN` — поддомен вашего аккаунта, например `mycompany.amocrm.ru`.
+**Режим-заглушка:** если `AMOCRM_SUBDOMAIN`/`CLIENT_ID`/`CLIENT_SECRET` пусты,
+`/order` по любому номеру сделки вернёт тестового клиента (с тестовым телефоном).
+Это позволяет проверить весь процесс до получения ключей.
 
 ### 2.3. Mango Office
 
@@ -71,7 +76,9 @@ docker compose logs -f bot    # проверить, что бот стартов
 
 При старте контейнер автоматически:
 1. применяет миграции БД (`alembic upgrade head`);
-2. запускает бота (long polling) и HTTP-сервер на порту 8080.
+2. создаёт предзаполненные рабочие группы (если их ещё нет);
+3. при заданных реквизитах amoCRM — обменивает `AMOCRM_AUTH_CODE` на токены;
+4. запускает бота (long polling) и HTTP-сервер на порту 8080.
 
 Проверка живости: `curl http://localhost:8080/health` → `{"status":"ok"}`.
 
@@ -86,8 +93,8 @@ docker compose logs -f bot    # проверить, что бот стартов
 | `BOT_TOKEN` | токен бота от @BotFather |
 | `ADMIN_TG_IDS` | Telegram ID администраторов через запятую |
 | `DB_NAME` / `DB_USER` / `DB_PASSWORD` | креды PostgreSQL (БД поднимается в compose) |
-| `AMOCRM_SUBDOMAIN`, `AMOCRM_ACCESS_TOKEN` | доступ к amoCRM |
 | `MANGO_API_KEY`, `MANGO_API_SALT`, `MANGO_LINE_NUMBER` | доступ к Mango |
+| amoCRM (опц.) | `AMOCRM_SUBDOMAIN`, `AMOCRM_CLIENT_ID`, `AMOCRM_CLIENT_SECRET`, `AMOCRM_REDIRECT_URI`, `AMOCRM_AUTH_CODE` — можно оставить пустыми (режим-заглушка) |
 
 > В docker-compose `DB_HOST`/`DB_PORT` переопределяются на `postgres`/`5432`
 > (внутренняя сеть), поэтому значения в `.env` для них не важны.
