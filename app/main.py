@@ -11,6 +11,7 @@ from app.bot.bot import create_bot, create_dispatcher
 from app.config import get_settings
 from app.db.database import dispose_engine, init_db
 from app.logging_config import setup_logging
+from app.services.bootstrap import ensure_amo_token, seed_groups
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,8 @@ async def main() -> None:
     setup_logging(settings.log_level)
 
     await init_db()
+    await seed_groups()
+    await ensure_amo_token()
 
     bot = create_bot()
     dp = create_dispatcher()
