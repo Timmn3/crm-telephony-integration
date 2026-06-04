@@ -1,19 +1,54 @@
-"""Тесты amoCRM-клиента с моками HTTP (aioresponses)."""
+"""Тесты amoCRM-клиента: режим-заглушка и реальный API с моками (aioresponses)."""
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from aioresponses import aioresponses
 
 from app.config import get_settings
-from app.db.repositories import settings_repo
+from app.db.repositories import amo_token_repo
 from app.services.amocrm import AmoCRMClient, LeadNotFound, PhoneNotFound
 
 BASE = "https://test.amocrm.ru"
 
 
-async def test_get_order_data_parses_lead_and_contact(session):
-    await settings_repo.set_value(session, settings_repo.AMOCRM_ACCESS_TOKEN, "tok")
-    settings = get_settings()
-    settings.amo_address_field_id = 777
+@contextmanager
+def configured_amo():
+    """Временно делает amoCRM «настроенным» (выходим из режима-заглушки)."""
+    s = get_settings()
+    saved = (s.amocrm_subdomain, s.amocrm_client_id, s.amocrm_client_secret,
+             s.amo_address_field_id)
+    s.amocrm_subdomain = "test.amocrm.ru"
+    s.amocrm_client_id = "cid"
+    s.amocrm_client_secret = "csec"
     try:
+        yield s
+    finally:
+        (s.amocrm_subdomain, s.amocrm_client_id, s.amocrm_client_secret,
+         s.amo_address_field_id) = saved
+
+
+async def _save_valid_token(session) -> None:
+    await amo_token_repo.save(
+        session, access_token="tok", refresh_token="ref",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+
+
+async def test_stub_mode_returns_fake_client(session):
+    """Без реквизитов интеграции — синтетический клиент, без обращения к сети."""
+    client = AmoCRMClient(session)
+    assert client.is_stub is True
+    data = await client.get_order_data(424242)
+    assert data.amo_lead_id == 424242
+    assert data.client_phone == "79991234567"
+    assert "Тестовый" in data.client_name
+
+
+async def test_get_order_data_parses_lead_and_contact(session):
+    with configured_amo() as s:
+        s.amo_address_field_id = 777
+        await _save_valid_token(session)
         with aioresponses() as m:
             m.get(
                 f"{BASE}/api/v4/leads/12345?with=contacts",
@@ -35,8 +70,6 @@ async def test_get_order_data_parses_lead_and_contact(session):
                 },
             )
             data = await AmoCRMClient(session).get_order_data(12345)
-    finally:
-        settings.amo_address_field_id = None
 
     assert data.client_phone == "79991234567"
     assert data.client_name == "Иванов"
@@ -45,37 +78,36 @@ async def test_get_order_data_parses_lead_and_contact(session):
 
 
 async def test_lead_not_found(session):
-    await settings_repo.set_value(session, settings_repo.AMOCRM_ACCESS_TOKEN, "tok")
-    with aioresponses() as m:
-        m.get(f"{BASE}/api/v4/leads/404?with=contacts", status=404)
-        with pytest.raises(LeadNotFound):
-            await AmoCRMClient(session).get_order_data(404)
+    with configured_amo():
+        await _save_valid_token(session)
+        with aioresponses() as m:
+            m.get(f"{BASE}/api/v4/leads/404?with=contacts", status=404)
+            with pytest.raises(LeadNotFound):
+                await AmoCRMClient(session).get_order_data(404)
 
 
 async def test_phone_not_found(session):
-    await settings_repo.set_value(session, settings_repo.AMOCRM_ACCESS_TOKEN, "tok")
-    with aioresponses() as m:
-        m.get(
-            f"{BASE}/api/v4/leads/500?with=contacts",
-            payload={"id": 500, "name": "X", "_embedded": {"contacts": [{"id": 7}]}},
-        )
-        m.get(f"{BASE}/api/v4/contacts/7", payload={"id": 7, "name": "Без телефона"})
-        with pytest.raises(PhoneNotFound):
-            await AmoCRMClient(session).get_order_data(500)
+    with configured_amo():
+        await _save_valid_token(session)
+        with aioresponses() as m:
+            m.get(
+                f"{BASE}/api/v4/leads/500?with=contacts",
+                payload={"id": 500, "name": "X", "_embedded": {"contacts": [{"id": 7}]}},
+            )
+            m.get(f"{BASE}/api/v4/contacts/7", payload={"id": 7, "name": "Без телефона"})
+            with pytest.raises(PhoneNotFound):
+                await AmoCRMClient(session).get_order_data(500)
 
 
 async def test_token_refresh_on_401(session):
-    await settings_repo.set_value(session, settings_repo.AMOCRM_ACCESS_TOKEN, "old")
-    await settings_repo.set_value(session, settings_repo.AMOCRM_REFRESH_TOKEN, "oldref")
-    settings = get_settings()
-    settings.amocrm_client_id = "cid"
-    settings.amocrm_client_secret = "csec"
-    try:
+    with configured_amo():
+        await _save_valid_token(session)
         with aioresponses() as m:
             m.get(f"{BASE}/api/v4/leads/999?with=contacts", status=401)
             m.post(
                 f"{BASE}/oauth2/access_token",
-                payload={"access_token": "newtok", "refresh_token": "newref"},
+                payload={"access_token": "newtok", "refresh_token": "newref",
+                         "expires_in": 86400},
             )
             m.get(
                 f"{BASE}/api/v4/leads/999?with=contacts",
@@ -91,9 +123,8 @@ async def test_token_refresh_on_401(session):
                 },
             )
             data = await AmoCRMClient(session).get_order_data(999)
-    finally:
-        settings.amocrm_client_id = ""
-        settings.amocrm_client_secret = ""
 
     assert data.client_phone == "79990000000"
-    assert await settings_repo.get(session, settings_repo.AMOCRM_ACCESS_TOKEN) == "newtok"
+    token = await amo_token_repo.get(session)
+    assert token.access_token == "newtok"
+    assert token.refresh_token == "newref"
