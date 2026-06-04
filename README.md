@@ -6,18 +6,30 @@
 менеджеру нужно позвонить, он запрашивает разрешение, оператор одобряет, и звонок
 инициируется через Mango Office (номер клиента нигде в Telegram не светится).
 
+Актуальное ТЗ — [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md).
+
 ## Стек
 
 Python 3.11+, aiogram 3.x, FastAPI + uvicorn, SQLAlchemy 2.x (async, asyncpg),
 Alembic, PostgreSQL 15, aiohttp, pydantic-settings, Docker.
 
+## Модель работы (v2)
+
+- **Группы вместо регионов.** В компании рабочие группы (Группа-1, Казань, Группа-5…).
+  В каждой группе в любой момент работает **один** менеджер. Админ переназначает:
+  старый менеджер при замене отвязывается от группы.
+- **Без кнопки «Беру».** Заявка сразу уходит единственному менеджеру группы в ЛС
+  (статус `SENT`). Конкуренции нет.
+- **Статусы:** SENT → CALL_REQUESTED → CALL_APPROVED → CALL_IN_PROGRESS →
+  COMPLETED (или CANCELLED).
+
 ## Роли
 
-- **admin** — управляет операторами, менеджерами, регионами. Назначается через
+- **admin** — управляет операторами, менеджерами, группами. Назначается через
   `ADMIN_TG_IDS` в `.env` (при первом `/start`).
 - **operator** — создаёт заявки (`/order`), одобряет/отклоняет звонки.
-- **manager** — берёт заявки, запрашивает звонок, звонит. При регистрации делится
-  контактом (номер телефона).
+- **manager** — получает заявки, запрашивает звонок, звонит. При регистрации
+  делится контактом (номер телефона).
 
 ## Команды
 
@@ -26,7 +38,7 @@ Alembic, PostgreSQL 15, aiohttp, pydantic-settings, Docker.
 | Все | `/start`, `/help`, `/me`, `/cancel` |
 | Оператор | `/order`, `/my_orders` |
 | Менеджер | `/my_tasks` |
-| Админ | `/add_operator`, `/add_manager`, `/add_region`, `/regions`, `/users`, `/remove_user`, `/amo_fields` |
+| Админ | `/add_operator`, `/add_manager`, `/add_group`, `/groups`, `/users`, `/remove_user`, `/amo_fields`, `/set_amo_code` |
 
 ## Быстрый старт (Docker)
 
@@ -36,8 +48,9 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-При старте контейнер сам применяет миграции (`alembic upgrade head`) и запускает
-бота (polling) + HTTP-сервер (healthcheck `/health`, webhook Mango).
+При старте контейнер сам применяет миграции (`alembic upgrade head`), создаёт
+предзаполненные группы (если их нет) и запускает бота (polling) + HTTP-сервер
+(healthcheck `/health`, webhook Mango).
 
 ## Локальный запуск (без Docker)
 
@@ -56,41 +69,47 @@ python -m app.main
 - `BOT_TOKEN` — токен бота от @BotFather.
 - `ADMIN_TG_IDS` — Telegram ID администраторов через запятую.
 - `DB_*` — параметры PostgreSQL.
-- `AMOCRM_SUBDOMAIN`, `AMOCRM_ACCESS_TOKEN` (и для автообновления —
-  `AMOCRM_REFRESH_TOKEN`, `AMOCRM_CLIENT_ID`, `AMOCRM_CLIENT_SECRET`,
-  `AMOCRM_REDIRECT_URI`).
 - `MANGO_API_KEY`, `MANGO_API_SALT`, `MANGO_LINE_NUMBER` (номер 8-800 в формате
   `7XXXXXXXXXX`).
+- amoCRM (OAuth): `AMOCRM_SUBDOMAIN`, `AMOCRM_CLIENT_ID`, `AMOCRM_CLIENT_SECRET`,
+  `AMOCRM_REDIRECT_URI`, `AMOCRM_AUTH_CODE`.
+
+### Режим-заглушка amoCRM
+
+Пока реквизиты amoCRM (`AMOCRM_SUBDOMAIN`/`CLIENT_ID`/`CLIENT_SECRET`) не заданы,
+бот работает в **режиме-заглушке**: `/order` по любому номеру сделки возвращает
+тестового клиента (с тестовым телефоном). Это позволяет проверить весь флоу
+(вплоть до звонка Mango) до получения ключей. После заполнения реквизитов и
+`AMOCRM_AUTH_CODE` бот при старте обменяет код на токены (хранятся в БД,
+обновляются автоматически). Если refresh-токен истёк — `/set_amo_code <code>`.
 
 ### Поля amoCRM
 
-ID кастомных полей (адрес) различаются в каждом аккаунте amoCRM. Узнать их:
-команда `/amo_fields` в боте (от админа) выведет список полей сделок и контактов с
-их ID. Затем задайте `AMO_ADDRESS_FIELD_ID` в `.env`. Телефон ищется автоматически
-по `field_code = PHONE` (можно переопределить через `AMO_PHONE_FIELD_ID`).
+ID кастомных полей (адрес) различаются в каждом аккаунте. Узнать: команда
+`/amo_fields` (от админа) выведет поля сделок и контактов с их ID. Затем задайте
+`AMO_ADDRESS_FIELD_ID` в `.env`. Телефон ищется по `field_code = PHONE`
+(можно переопределить `AMO_PHONE_FIELD_ID`).
 
-## Регистрация пользователей: важная особенность Telegram
+## Регистрация пользователей: особенность Telegram
 
 Бот **не может** узнать Telegram ID по `@username` и не может написать
-пользователю первым, пока тот сам не обратился к боту. Поэтому:
+пользователю первым, пока тот сам не обратился к боту. Поэтому менеджера/оператора
+добавляют одним из способов:
 
-1. Новый сотрудник пишет боту `/start` — бот покажет его Telegram ID.
-2. Сотрудник сообщает ID администратору.
-3. Админ выполняет `/add_operator <id>` или `/add_manager <id>` (затем выбирает
-   регион).
-
-`@username` поддерживается только для пользователей, которых бот уже «видел».
+1. Сотрудник пишет боту `/start` — бот покажет его Telegram ID; он сообщает ID админу.
+2. Админ **пересылает боту сообщение** от сотрудника (бот узнаёт ID из пересылки).
+3. По `@username` — только если бот уже «видел» этого пользователя.
 
 ## Сценарий звонка (маскирование)
 
-1. Менеджер берёт заявку → «Запросить звонок».
+1. Менеджер в карточке жмёт «Запросить звонок».
 2. Оператор одобряет.
 3. Менеджер жмёт «Позвонить» → бот шлёт callback в Mango с номером менеджера и
    клиента и линией 8-800. Mango звонит менеджеру, затем соединяет с клиентом.
    Реальные номера в Telegram не показываются.
 
-Webhook событий Mango (опционально): `POST /webhooks/mango/call`. Для whitelisting
-на стороне reverse-proxy IP Mango: `81.88.80.132`, `81.88.80.133`, `81.88.82.36`.
+Webhook событий Mango (опционально): `POST /webhooks/mango/call`. IP Mango для
+whitelisting на reverse-proxy: `81.88.80.132`, `81.88.80.133`, `81.88.82.36`.
 
 ## Тесты
 
@@ -102,13 +121,13 @@ pytest -q
 
 ## Структура
 
-```
+```text
 app/
   main.py            # точка входа (polling + uvicorn)
   config.py          # настройки из .env
   logging_config.py  # логирование (консоль + файл)
   bot/               # aiogram: handlers, middlewares, filters, keyboards, states
-  services/          # amocrm, mango, order_service (бизнес-логика заявок)
+  services/          # amocrm, mango, order_service, bootstrap (seed + auth)
   db/                # models, database, repositories
   api/               # FastAPI: healthcheck, webhook Mango
 alembic/             # миграции
@@ -122,5 +141,4 @@ tests/               # unit + интеграционные тесты
 - Проверка ролей и принадлежности на каждое действие.
 - Кнопка «Позвонить» одноразовая (только в статусе «звонок одобрен»).
 - Все звонки логируются в таблицу `call_log`.
-- Конкурентное взятие заявки атомарно (один первый менеджер).
-```
+- amoCRM-токены хранятся в БД; секреты Mango — только в `.env` на сервере.
