@@ -1,6 +1,6 @@
 """SQLAlchemy-модели приложения.
 
-Содержит таблицы users, regions, orders, call_log, settings и перечисления
+Содержит таблицы users, groups, orders, call_log, amo_tokens и перечисления
 ролей и статусов заявок.
 
 ВАЖНО (безопасность): поле Order.client_phone хранит реальный номер клиента и
@@ -39,11 +39,13 @@ class UserRole(str, PyEnum):
 
 
 class OrderStatus(str, PyEnum):
-    """Статусы заявки (жизненный цикл)."""
+    """Статусы заявки (жизненный цикл).
 
-    NEW = "new"                          # Создана оператором, ещё не отправлена
-    SENT = "sent"                        # Отправлена менеджеру/в группу
-    TAKEN = "taken"                      # Менеджер нажал «Беру»
+    Заявка сразу создаётся в статусе SENT и отправляется единственному менеджеру
+    группы — кнопки «Беру» нет, конкуренции нет (статусы NEW/TAKEN убраны в v2).
+    """
+
+    SENT = "sent"                        # Отправлена менеджеру группы
     CALL_REQUESTED = "call_requested"    # Менеджер запросил звонок
     CALL_APPROVED = "call_approved"      # ОП одобрил звонок
     CALL_IN_PROGRESS = "call_in_progress"  # Звонок инициирован через Mango
@@ -64,21 +66,26 @@ _ORDER_STATUS_ENUM = SAEnum(
 )
 
 
-class Region(Base):
-    """Регион выезда."""
+class Group(Base):
+    """Рабочая группа (слот менеджера).
 
-    __tablename__ = "regions"
+    В компании 11 групп, в каждой в любой момент работает не более одного
+    активного менеджера (см. User.group_id). Менеджеры в группе меняются —
+    админ переназначает, при этом предыдущий отвязывается (group_id=NULL).
+    """
+
+    __tablename__ = "groups"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    tg_group_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    city: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    users: Mapped[list["User"]] = relationship(back_populates="region")
-    orders: Mapped[list["Order"]] = relationship(back_populates="region")
+    users: Mapped[list["User"]] = relationship(back_populates="group")
+    orders: Mapped[list["Order"]] = relationship(back_populates="group")
 
     def __repr__(self) -> str:
-        return f"<Region id={self.id} name={self.name!r}>"
+        return f"<Group id={self.id} name={self.name!r} city={self.city!r}>"
 
 
 class User(Base):
@@ -94,22 +101,22 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     role: Mapped[UserRole] = mapped_column(_USER_ROLE_ENUM, nullable=False)
-    region_id: Mapped[int | None] = mapped_column(
-        ForeignKey("regions.id", ondelete="SET NULL"), nullable=True
+    group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("groups.id", ondelete="SET NULL"), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    region: Mapped[Region | None] = relationship(back_populates="users")
+    group: Mapped[Group | None] = relationship(back_populates="users")
 
     def __repr__(self) -> str:
         return f"<User id={self.id} tg_id={self.tg_id} role={self.role}>"
 
 
 class Order(Base):
-    """Заявка из amoCRM, отправленная менеджеру."""
+    """Заявка из amoCRM, отправленная менеджеру группы."""
 
     __tablename__ = "orders"
 
@@ -120,13 +127,14 @@ class Order(Base):
     client_phone: Mapped[str] = mapped_column(String(32), nullable=False)
     client_address: Mapped[str | None] = mapped_column(String(512), nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
-    region_id: Mapped[int] = mapped_column(
-        ForeignKey("regions.id", ondelete="RESTRICT"), nullable=False
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("groups.id", ondelete="RESTRICT"), nullable=False
     )
     operator_tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Менеджер берётся автоматически из группы в момент отправки.
     manager_tg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[OrderStatus] = mapped_column(
-        _ORDER_STATUS_ENUM, default=OrderStatus.NEW, nullable=False, index=True
+        _ORDER_STATUS_ENUM, default=OrderStatus.SENT, nullable=False, index=True
     )
     tg_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     tg_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -146,41 +154,13 @@ class Order(Base):
         nullable=False,
     )
 
-    region: Mapped[Region] = relationship(back_populates="orders")
+    group: Mapped[Group] = relationship(back_populates="orders")
     call_logs: Mapped[list["CallLog"]] = relationship(
-        back_populates="order", cascade="all, delete-orphan"
-    )
-    messages: Mapped[list["OrderMessage"]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:
         return f"<Order id={self.id} amo={self.amo_lead_id} status={self.status}>"
-
-
-class OrderMessage(Base):
-    """Сообщение-карточка заявки, отправленное в конкретный чат.
-
-    Одна заявка при рассылке «всем менеджерам региона» порождает несколько
-    сообщений (по одному в ЛС каждому менеджеру). Храним их, чтобы обновлять
-    карточки у всех адресатов при смене статуса.
-    """
-
-    __tablename__ = "order_messages"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    order_id: Mapped[int] = mapped_column(
-        ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    # tg_id менеджера-адресата (для рассылки в ЛС). NULL — если это группа.
-    recipient_tg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-
-    order: Mapped[Order] = relationship(back_populates="messages")
-
-    def __repr__(self) -> str:
-        return f"<OrderMessage order={self.order_id} chat={self.chat_id} msg={self.message_id}>"
 
 
 class CallLog(Base):
@@ -206,14 +186,21 @@ class CallLog(Base):
         return f"<CallLog id={self.id} order={self.order_id} status={self.status}>"
 
 
-class Setting(Base):
-    """Key-value хранилище настроек (токены amoCRM и т.п.)."""
+class AmoToken(Base):
+    """OAuth-токены amoCRM (всегда одна запись).
 
-    __tablename__ = "settings"
+    Хранятся в БД, а не в .env: access/refresh обновляются автоматически по
+    refresh_token. В .env остаётся только одноразовый код авторизации.
+    """
+
+    __tablename__ = "amo_tokens"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
-    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    refresh_token: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -222,4 +209,4 @@ class Setting(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Setting key={self.key!r}>"
+        return f"<AmoToken id={self.id} expires_at={self.expires_at}>"
