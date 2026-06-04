@@ -1,46 +1,64 @@
 """Inline-клавиатуры и формат callback_data.
 
-Формат callback_data: ``action:order_id`` или ``action:order_id:extra``.
+Формат callback_data: ``action:id`` или ``action:id:extra``.
+
+Примечание: при создании заявки select_group / skip_comment не несут order_id —
+заявка создаётся в БД только в конце диалога (после комментария), id заранее нет.
+Данные сделки до этого момента живут в FSM оператора.
 """
 from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.db.models import Order, OrderStatus, Region, User
+from app.db.models import Group, Order, OrderStatus
 
 
-def regions_keyboard(regions: list[Region], prefix: str) -> InlineKeyboardMarkup:
-    """Кнопки выбора региона. callback_data: ``{prefix}:{region_id}``."""
+def groups_keyboard(groups: list[Group], prefix: str) -> InlineKeyboardMarkup:
+    """Простой выбор группы (для добавления менеджера админом).
+
+    callback_data: ``{prefix}:{group_id}``.
+    """
     builder = InlineKeyboardBuilder()
-    for region in regions:
-        builder.button(text=region.name, callback_data=f"{prefix}:{region.id}")
+    for group in groups:
+        builder.button(text=group.name, callback_data=f"{prefix}:{group.id}")
+    builder.adjust(3)
+    return builder.as_markup()
+
+
+def groups_select_keyboard(
+    groups: list[Group], manager_names: dict[int, str | None]
+) -> InlineKeyboardMarkup:
+    """Выбор группы оператором при создании заявки.
+
+    Рядом с названием — имя текущего менеджера или «свободна».
+    callback_data: ``select_group:{group_id}``.
+    """
+    builder = InlineKeyboardBuilder()
+    for group in groups:
+        who = manager_names.get(group.id)
+        label = f"{group.name} ({who})" if who else f"{group.name} (свободна)"
+        builder.button(text=label, callback_data=f"select_group:{group.id}")
     builder.adjust(2)
     return builder.as_markup()
 
 
-def managers_keyboard(
-    managers: list[User], order_id: int, prefix: str = "select_manager"
-) -> InlineKeyboardMarkup:
-    """Кнопки выбора менеджера. callback_data: ``{prefix}:{user_id}:{order_id}``."""
+def confirm_replace_keyboard(user_id: int, group_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение замены менеджера в занятой группе."""
     builder = InlineKeyboardBuilder()
-    for manager in managers:
-        title = manager.full_name or (f"@{manager.tg_username}" if manager.tg_username else str(manager.tg_id))
-        builder.button(
-            text=title,
-            callback_data=f"{prefix}:{manager.id}:{order_id}",
-        )
-    builder.adjust(1)
+    builder.button(text="✅ Да, заменить", callback_data=f"confirm_replace:{user_id}:{group_id}")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(2)
     return builder.as_markup()
 
 
-def send_target_keyboard(order_id: int) -> InlineKeyboardMarkup:
-    """Выбор: отправить всем региона или выбрать конкретного менеджера."""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📢 Всем в регион", callback_data=f"send_all:{order_id}")
-    builder.button(text="👤 Выбрать менеджера", callback_data=f"send_pick:{order_id}")
-    builder.adjust(1)
-    return builder.as_markup()
+def skip_comment_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка «Без комментария» при создании заявки."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="Без комментария", callback_data="skip_comment")
+        ]]
+    )
 
 
 def cancel_keyboard(callback_data: str = "cancel") -> InlineKeyboardMarkup:
@@ -55,20 +73,22 @@ def cancel_keyboard(callback_data: str = "cancel") -> InlineKeyboardMarkup:
 # --------------------------------------------------------------------------- #
 
 def manager_card_keyboard(order: Order) -> InlineKeyboardMarkup | None:
-    """Кнопки на карточке заявки у менеджера в зависимости от статуса."""
+    """Кнопки на карточке заявки у менеджера в зависимости от статуса.
+
+    Кнопка «Закрыть заявку» доступна на всех активных статусах.
+    """
     builder = InlineKeyboardBuilder()
     status = order.status
 
     if status == OrderStatus.SENT:
-        builder.button(text="✅ Беру заявку", callback_data=f"take_order:{order.id}")
-    elif status == OrderStatus.TAKEN:
         builder.button(text="📞 Запросить звонок клиенту", callback_data=f"request_call:{order.id}")
         builder.button(text="✔️ Закрыть заявку", callback_data=f"complete_order:{order.id}")
     elif status == OrderStatus.CALL_REQUESTED:
-        # Ожидание одобрения — кнопок действий нет.
-        return None
+        # Ожидание одобрения — действий нет, только закрыть.
+        builder.button(text="✔️ Закрыть заявку", callback_data=f"complete_order:{order.id}")
     elif status == OrderStatus.CALL_APPROVED:
         builder.button(text="📞 Позвонить клиенту", callback_data=f"make_call:{order.id}")
+        builder.button(text="✔️ Закрыть заявку", callback_data=f"complete_order:{order.id}")
     elif status == OrderStatus.CALL_IN_PROGRESS:
         builder.button(text="📞 Запросить звонок ещё раз", callback_data=f"request_call:{order.id}")
         builder.button(text="✔️ Закрыть заявку", callback_data=f"complete_order:{order.id}")
@@ -86,14 +106,3 @@ def operator_call_request_keyboard(order_id: int) -> InlineKeyboardMarkup:
     builder.button(text="❌ Отклонить", callback_data=f"reject_call:{order_id}")
     builder.adjust(2)
     return builder.as_markup()
-
-
-def skip_reason_keyboard(order_id: int) -> InlineKeyboardMarkup:
-    """Кнопка «Без причины» при отклонении звонка."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="Без причины", callback_data=f"reject_noreason:{order_id}"
-            )
-        ]]
-    )

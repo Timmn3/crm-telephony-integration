@@ -9,12 +9,14 @@ class AddOperator(StatesGroup):
 
 
 class AddManager(StatesGroup):
-    waiting_tg_id = State()
-    waiting_region = State()
+    waiting_target = State()   # ввод @username или пересылка сообщения менеджера
+    waiting_group = State()    # выбор группы
+    waiting_replace = State()  # подтверждение замены текущего менеджера
 
 
-class AddRegion(StatesGroup):
+class AddGroup(StatesGroup):
     waiting_name = State()
+    waiting_city = State()
 
 
 class RemoveUser(StatesGroup):
@@ -23,9 +25,9 @@ class RemoveUser(StatesGroup):
 
 class CreateOrder(StatesGroup):
     waiting_lead_id = State()
-    waiting_region = State()
-    waiting_target = State()  # всем в регион или выбрать менеджера
+    waiting_group = State()
+    waiting_comment = State()
 
 
-class RejectCall(StatesGroup):
-    waiting_reason = State()
+class SetAmoCode(StatesGroup):
+    waiting_code = State()
