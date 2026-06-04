@@ -1,7 +1,10 @@
-"""Бизнес-логика заявок: рендер карточки, рассылка, обновление сообщений.
+"""Бизнес-логика заявок: рендер карточки, отправка менеджеру, обновление.
 
 КРИТИЧНО (безопасность): функция render_card НИКОГДА не включает client_phone.
 Телефон клиента не попадает ни в текст карточки, ни в кнопки, ни в логи.
+
+В v2 одна заявка = одно сообщение единственному менеджеру группы (рассылки нет),
+поэтому координаты сообщения хранятся прямо на Order (tg_chat_id/tg_message_id).
 """
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.inline import manager_card_keyboard
-from app.db.models import Order, OrderStatus, User
+from app.db.models import Order, OrderStatus
 from app.db.repositories import order_repo
 
 logger = logging.getLogger(__name__)
@@ -34,12 +37,7 @@ def status_note(order: Order) -> str | None:
     }.get(order.status)
 
 
-def render_card(
-    order: Order,
-    *,
-    manager_name: str | None = None,
-    note: str | None = None,
-) -> str:
+def render_card(order: Order, *, note: str | None = None) -> str:
     """Формирует HTML-текст карточки заявки. Без номера телефона клиента!"""
     lines = [
         f"📋 <b>Заявка #{order.amo_lead_id}</b>",
@@ -50,8 +48,6 @@ def render_card(
         lines.append(f"<b>Адрес:</b> {html.escape(order.client_address)}")
     if order.comment:
         lines.append(f"<b>Комментарий:</b> {html.escape(order.comment)}")
-    if manager_name:
-        lines.append(f"<b>Менеджер:</b> {html.escape(manager_name)}")
     if note:
         lines.append("")
         lines.append(note)
@@ -59,81 +55,40 @@ def render_card(
 
 
 # --------------------------------------------------------------------------- #
-# Рассылка
+# Отправка и обновление карточки
 # --------------------------------------------------------------------------- #
 
-async def send_to_manager(
-    bot: Bot, session: AsyncSession, order: Order, manager: User
-) -> bool:
-    """Отправляет карточку заявки одному менеджеру в ЛС. True при успехе."""
-    text = render_card(order)
+async def send_to_manager(bot: Bot, session: AsyncSession, order: Order) -> bool:
+    """Отправляет карточку заявки назначенному менеджеру в ЛС. True при успехе."""
+    if order.manager_tg_id is None:
+        logger.warning("Заявка #%s без менеджера — отправка невозможна", order.id)
+        return False
+    text = render_card(order, note=status_note(order))
     kb = manager_card_keyboard(order)
     try:
-        msg = await bot.send_message(manager.tg_id, text, reply_markup=kb)
+        msg = await bot.send_message(order.manager_tg_id, text, reply_markup=kb)
     except (TelegramForbiddenError, TelegramBadRequest) as exc:
         logger.warning("Не удалось отправить заявку #%s менеджеру tg_id=%s: %s",
-                       order.id, manager.tg_id, exc)
+                       order.id, order.manager_tg_id, exc)
         return False
-    await order_repo.add_message(
-        session, order.id, msg.chat.id, msg.message_id, recipient_tg_id=manager.tg_id
-    )
-    if order.tg_message_id is None:
-        await order_repo.set_primary_message(session, order, msg.chat.id, msg.message_id)
-    logger.info("Заявка #%s отправлена менеджеру tg_id=%s", order.id, manager.tg_id)
+    await order_repo.set_message(session, order, msg.chat.id, msg.message_id)
+    logger.info("Заявка #%s отправлена менеджеру tg_id=%s", order.id, order.manager_tg_id)
     return True
 
 
-async def broadcast_to_managers(
-    bot: Bot, session: AsyncSession, order: Order, managers: list[User]
-) -> int:
-    """Рассылает карточку всем менеджерам в ЛС. Возвращает число доставленных."""
-    delivered = 0
-    for manager in managers:
-        if await send_to_manager(bot, session, order, manager):
-            delivered += 1
-    logger.info("Заявка #%s разослана: доставлено %s из %s",
-                order.id, delivered, len(managers))
-    return delivered
-
-
-# --------------------------------------------------------------------------- #
-# Обновление карточек при смене статуса
-# --------------------------------------------------------------------------- #
-
-async def refresh_cards(
-    bot: Bot, session: AsyncSession, order: Order, *, manager_name: str | None = None
-) -> None:
-    """Обновляет все разосланные карточки заявки под текущий статус.
-
-    - адресату-владельцу (взявшему заявку) показываются актуальные кнопки;
-    - остальным получателям рассылки показывается «заявку взял другой менеджер»
-      без кнопок.
-    """
-    messages = await order_repo.list_messages(session, order.id)
-    note = status_note(order)
-
-    for om in messages:
-        is_owner = (
-            order.manager_tg_id is not None
-            and om.recipient_tg_id == order.manager_tg_id
+async def refresh_card(bot: Bot, order: Order) -> None:
+    """Обновляет карточку заявки под текущий статус (текст + кнопки)."""
+    if order.tg_chat_id is None or order.tg_message_id is None:
+        return
+    text = render_card(order, note=status_note(order))
+    kb = manager_card_keyboard(order)
+    try:
+        await bot.edit_message_text(
+            text,
+            chat_id=order.tg_chat_id,
+            message_id=order.tg_message_id,
+            reply_markup=kb,
         )
-        if order.manager_tg_id is None or is_owner:
-            text = render_card(order, manager_name=manager_name, note=note)
-            kb = manager_card_keyboard(order)
-        else:
-            text = render_card(
-                order, note="🚫 Заявку взял другой менеджер."
-            )
-            kb = None
-
-        try:
-            await bot.edit_message_text(
-                text,
-                chat_id=om.chat_id,
-                message_id=om.message_id,
-                reply_markup=kb,
-            )
-        except TelegramBadRequest as exc:
-            # «message is not modified» / устаревшее сообщение — не критично.
-            logger.debug("Не удалось обновить карточку (chat=%s msg=%s): %s",
-                         om.chat_id, om.message_id, exc)
+    except TelegramBadRequest as exc:
+        # «message is not modified» / устаревшее сообщение — не критично.
+        logger.debug("Не удалось обновить карточку заявки #%s: %s", order.id, exc)
