@@ -1,12 +1,12 @@
 """Обработчики команд администратора.
 
-Команды: /add_region, /regions, /add_operator, /add_manager, /users, /remove_user.
+Команды: /add_group, /groups, /add_operator, /add_manager, /users,
+/remove_user, /amo_fields, /set_amo_code.
 
 Примечание про Telegram: бот не может узнать tg_id по @username и не может
-написать пользователю первым, пока тот сам не обратится к боту. Поэтому
-основной способ добавления — по числовому Telegram ID (пользователь сначала
-пишет боту /start и сообщает свой ID администратору). @username поддерживается
-только для пользователей, уже известных боту.
+написать пользователю первым, пока тот сам не обратится к боту. Способы добавить
+менеджера: переслать боту его сообщение (из пересылки берём tg_id) либо ввести
+числовой Telegram ID. @username работает только для уже известных боту.
 """
 from __future__ import annotations
 
@@ -21,11 +21,11 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters.role import IsAdmin
-from app.bot.keyboards.inline import cancel_keyboard, regions_keyboard
+from app.bot.keyboards.inline import cancel_keyboard, confirm_replace_keyboard, groups_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard
-from app.bot.states import AddManager, AddOperator, AddRegion, RemoveUser
+from app.bot.states import AddGroup, AddManager, AddOperator, RemoveUser, SetAmoCode
 from app.db.models import User, UserRole
-from app.db.repositories import region_repo, user_repo
+from app.db.repositories import group_repo, user_repo
 from app.services.amocrm import AmoCRMClient, AmoCRMError
 
 logger = logging.getLogger(__name__)
@@ -48,8 +48,8 @@ async def _resolve_target(
 ) -> tuple[User | None, int | None, str | None]:
     """Разрешает идентификатор (@username или числовой tg_id).
 
-    Возвращает (existing_user, tg_id, error). Если ошибка — error заполнен.
-    existing_user может быть None при числовом id незнакомого пользователя.
+    Возвращает (existing_user, tg_id, error). existing_user может быть None при
+    числовом id незнакомого пользователя.
     """
     identifier = identifier.strip()
     if not identifier:
@@ -59,8 +59,8 @@ async def _resolve_target(
         user = await user_repo.get_by_username(session, identifier)
         if user is None:
             return None, None, (
-                "Пользователь с таким @username боту неизвестен. "
-                "Пусть он сначала напишет боту /start, либо укажите числовой Telegram ID."
+                "Пользователь с таким @username боту неизвестен. Перешлите его "
+                "сообщение боту или укажите числовой Telegram ID."
             )
         return user, user.tg_id, None
 
@@ -73,7 +73,7 @@ async def _resolve_target(
 
 
 async def _notify_new_user(bot: Bot, tg_id: int, text: str, **kwargs) -> bool:
-    """Пытается отправить уведомление новому пользователю. True при успехе."""
+    """Пытается отправить уведомление пользователю. True при успехе."""
     try:
         await bot.send_message(tg_id, text, **kwargs)
         return True
@@ -83,48 +83,78 @@ async def _notify_new_user(bot: Bot, tg_id: int, text: str, **kwargs) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Регионы
+# Группы
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("add_region"), IsAdmin)
-async def add_region_start(
+@router.message(Command("add_group"), IsAdmin)
+async def add_group_start(
     message: Message, command: CommandObject, state: FSMContext, session: AsyncSession
 ) -> None:
     if command.args:
-        await _create_region(message, command.args.strip(), session)
+        # «/add_group Группа-4 Москва» — первое слово название, остальное город.
+        parts = command.args.strip().split(maxsplit=1)
+        name = parts[0]
+        city = parts[1] if len(parts) > 1 else ""
+        await _create_group(message, name, city, session)
         return
-    await state.set_state(AddRegion.waiting_name)
-    await message.answer("Введите название региона:", reply_markup=cancel_keyboard())
+    await state.set_state(AddGroup.waiting_name)
+    await message.answer("Введите название группы (например «Группа-4»):",
+                         reply_markup=cancel_keyboard())
 
 
-@router.message(AddRegion.waiting_name)
-async def add_region_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
+@router.message(AddGroup.waiting_name)
+async def add_group_name(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Название не может быть пустым. Попробуйте снова или /cancel.")
+        return
+    await state.update_data(group_name=name)
+    await state.set_state(AddGroup.waiting_city)
+    await message.answer("Введите город группы (например «Москва»):",
+                         reply_markup=cancel_keyboard())
+
+
+@router.message(AddGroup.waiting_city)
+async def add_group_city(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
     await state.clear()
-    await _create_region(message, (message.text or "").strip(), session)
+    await _create_group(message, data.get("group_name", ""), (message.text or "").strip(), session)
 
 
-async def _create_region(message: Message, name: str, session: AsyncSession) -> None:
+async def _create_group(message: Message, name: str, city: str, session: AsyncSession) -> None:
     if not name:
         await message.answer("Название не может быть пустым.")
         return
-    existing = await region_repo.get_by_name(session, name)
+    existing = await group_repo.get_by_name(session, name)
     if existing is not None:
-        await message.answer(f"Регион «{html.escape(name)}» уже существует.")
+        await message.answer(f"Группа «{html.escape(name)}» уже существует.")
         return
-    region = await region_repo.create(session, name)
-    await message.answer(f"✅ Регион «{html.escape(region.name)}» создан (id={region.id}).")
+    group = await group_repo.create(session, name, city)
+    await message.answer(
+        f"✅ Группа «{html.escape(group.name)}» создана "
+        f"(город: {html.escape(group.city or '—')}, id={group.id})."
+    )
 
 
-@router.message(Command("regions"), IsAdmin)
-async def list_regions(message: Message, session: AsyncSession) -> None:
-    regions = await region_repo.list_all(session)
-    if not regions:
-        await message.answer("Регионов пока нет. Создайте: /add_region <название>")
+@router.message(Command("groups"), IsAdmin)
+async def list_groups(message: Message, session: AsyncSession) -> None:
+    groups = await group_repo.list_all(session)
+    if not groups:
+        await message.answer("Групп пока нет. Создайте: /add_group <название> <город>")
         return
-    lines = ["<b>Регионы:</b>"]
-    for r in regions:
-        mark = "✅" if r.is_active else "🚫"
-        lines.append(f"{mark} #{r.id} {html.escape(r.name)}")
+    lines = ["<b>Группы:</b>"]
+    for g in groups:
+        mark = "✅" if g.is_active else "🚫"
+        manager = await user_repo.get_active_manager_by_group(session, g.id)
+        who = "свободна"
+        if manager is not None:
+            who = manager.full_name or (
+                f"@{manager.tg_username}" if manager.tg_username else str(manager.tg_id)
+            )
+        lines.append(
+            f"{mark} #{g.id} <b>{html.escape(g.name)}</b> "
+            f"({html.escape(g.city or '—')}) — {html.escape(who)}"
+        )
     await message.answer("\n".join(lines))
 
 
@@ -195,25 +225,38 @@ async def add_manager_start(
     message: Message, command: CommandObject, state: FSMContext, session: AsyncSession
 ) -> None:
     if command.args:
-        await _ask_manager_region(message, command.args.strip(), state, session)
+        await _resolve_manager_target(message, command.args.strip(), state, session)
         return
-    await state.set_state(AddManager.waiting_tg_id)
+    await state.set_state(AddManager.waiting_target)
     await message.answer(
-        "Введите Telegram ID нового менеджера (число) или @username, "
-        "если он уже писал боту.\n\n"
-        "ℹ️ Узнать свой ID пользователь может, написав боту /start.",
+        "Перешлите сообщение от нового менеджера или введите его @username / "
+        "числовой Telegram ID.\n\n"
+        "ℹ️ Пересланное сообщение позволяет боту узнать его ID автоматически.",
         reply_markup=cancel_keyboard(),
     )
 
 
-@router.message(AddManager.waiting_tg_id)
-async def add_manager_id(
+@router.message(AddManager.waiting_target)
+async def add_manager_target(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
-    await _ask_manager_region(message, (message.text or "").strip(), state, session)
+    # 1) Пересланное сообщение — берём отправителя.
+    fwd = message.forward_from
+    if fwd is not None:
+        full_name = fwd.full_name or ""
+        username = fwd.username
+        existing = await user_repo.get_by_tg_id(session, fwd.id)
+        await _offer_groups(
+            message, state, session,
+            tg_id=fwd.id, full_name=full_name, username=username,
+            existing=existing,
+        )
+        return
+    # 2) Текст: @username или tg_id.
+    await _resolve_manager_target(message, (message.text or "").strip(), state, session)
 
 
-async def _ask_manager_region(
+async def _resolve_manager_target(
     message: Message, identifier: str, state: FSMContext, session: AsyncSession
 ) -> None:
     user, tg_id, error = await _resolve_target(session, identifier)
@@ -221,59 +264,128 @@ async def _ask_manager_region(
         await message.answer(f"❌ {error}")
         await state.clear()
         return
-
-    regions = await region_repo.list_active(session)
-    if not regions:
-        await message.answer("Сначала создайте хотя бы один регион: /add_region <название>")
-        await state.clear()
-        return
-
-    await state.set_state(AddManager.waiting_region)
-    await state.update_data(manager_tg_id=tg_id)
-    await message.answer(
-        "Выберите регион для менеджера:",
-        reply_markup=regions_keyboard(regions, prefix="admin_region"),
+    await _offer_groups(
+        message, state, session,
+        tg_id=tg_id,
+        full_name=user.full_name if user else "",
+        username=user.tg_username if user else None,
+        existing=user,
     )
 
 
-@router.callback_query(AddManager.waiting_region, F.data.startswith("admin_region:"))
-async def add_manager_region(
+async def _offer_groups(
+    message: Message, state: FSMContext, session: AsyncSession,
+    *, tg_id: int, full_name: str, username: str | None, existing: User | None,
+) -> None:
+    groups = await group_repo.list_active(session)
+    if not groups:
+        await message.answer("Сначала создайте хотя бы одну группу: /add_group <название> <город>")
+        await state.clear()
+        return
+    await state.update_data(
+        manager_tg_id=tg_id, manager_full_name=full_name, manager_username=username
+    )
+    await state.set_state(AddManager.waiting_group)
+    await message.answer(
+        "Выберите группу для менеджера:",
+        reply_markup=groups_keyboard(groups, prefix="admin_group"),
+    )
+
+
+@router.callback_query(AddManager.waiting_group, F.data.startswith("admin_group:"))
+async def add_manager_group(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
-    region_id = int(callback.data.split(":")[1])
+    group_id = int(callback.data.split(":")[1])
+    group = await group_repo.get_by_id(session, group_id)
     data = await state.get_data()
     tg_id = data.get("manager_tg_id")
-    await state.clear()
-
-    region = await region_repo.get_by_id(session, region_id)
-    if region is None or tg_id is None:
-        await callback.message.edit_text("❌ Ошибка: регион не найден.")
+    if group is None or tg_id is None:
+        await state.clear()
+        await callback.message.edit_text("❌ Ошибка: группа не найдена.")
         await callback.answer()
         return
 
+    current = await user_repo.get_active_manager_by_group(session, group_id)
+    if current is not None and current.tg_id != tg_id:
+        # Группа занята — спрашиваем подтверждение замены.
+        await state.update_data(group_id=group_id)
+        await state.set_state(AddManager.waiting_replace)
+        cur_name = current.full_name or (
+            f"@{current.tg_username}" if current.tg_username else str(current.tg_id)
+        )
+        await callback.message.edit_text(
+            f"В группе «{html.escape(group.name)}» сейчас работает "
+            f"<b>{html.escape(cur_name)}</b>. Заменить его на нового менеджера?",
+            reply_markup=confirm_replace_keyboard(tg_id, group_id),
+        )
+        await callback.answer()
+        return
+
+    await _assign_manager(callback.message, state, session, bot, group_id)
+    await callback.answer()
+
+
+@router.callback_query(AddManager.waiting_replace, F.data.startswith("confirm_replace:"))
+async def add_manager_replace(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    data = await state.get_data()
+    group_id = data.get("group_id")
+    if group_id is None:
+        await state.clear()
+        await callback.message.edit_text("❌ Ошибка: группа не определена.")
+        await callback.answer()
+        return
+    # Отвязываем прежнего менеджера (group_id=NULL), оставляя активным.
+    previous = await user_repo.unassign_from_group(session, group_id)
+    if previous is not None:
+        await _notify_new_user(
+            bot, previous.tg_id,
+            "ℹ️ Вы откреплены от группы. Новые заявки по ней приходить не будут.",
+        )
+    await _assign_manager(callback.message, state, session, bot, group_id)
+    await callback.answer()
+
+
+async def _assign_manager(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, group_id: int
+) -> None:
+    data = await state.get_data()
+    tg_id = data["manager_tg_id"]
+    full_name = data.get("manager_full_name") or ""
+    username = data.get("manager_username")
+    await state.clear()
+
+    group = await group_repo.get_by_id(session, group_id)
     user = await user_repo.get_by_tg_id(session, tg_id)
     if user is not None:
         await user_repo.set_role(session, user, UserRole.MANAGER)
-        await user_repo.set_region(session, user, region_id)
+        await user_repo.set_group(session, user, group_id)
         await user_repo.set_active(session, user, True)
     else:
         user = await user_repo.create(
-            session, tg_id=tg_id, role=UserRole.MANAGER, full_name="", region_id=region_id
+            session, tg_id=tg_id, role=UserRole.MANAGER,
+            full_name=full_name, tg_username=username, group_id=group_id,
         )
 
-    await callback.message.edit_text(
-        f"✅ Менеджер добавлен (tg_id={tg_id}), регион: {html.escape(region.name)}."
-    )
-    await callback.answer()
+    gname = html.escape(group.name) if group else str(group_id)
+    has_phone = bool(user.phone)
+    await message.edit_text(f"✅ Менеджер добавлен (tg_id={tg_id}), группа: {gname}.")
 
-    delivered = await _notify_new_user(
-        bot, tg_id,
-        f"✅ Вас добавили как выездного менеджера, регион: <b>{html.escape(region.name)}</b>.\n\n"
-        "Пожалуйста, поделитесь номером телефона для связи через систему звонков.",
-        reply_markup=phone_request_keyboard(),
+    text = (
+        f"✅ Вас назначили выездным менеджером, группа: <b>{gname}</b>"
+        f"{(', ' + html.escape(group.city)) if group and group.city else ''}.\n\n"
     )
+    if has_phone:
+        text += "Телефон уже сохранён — можно принимать заявки."
+        delivered = await _notify_new_user(bot, tg_id, text)
+    else:
+        text += "Пожалуйста, поделитесь номером телефона для связи через систему звонков."
+        delivered = await _notify_new_user(bot, tg_id, text, reply_markup=phone_request_keyboard())
+
     if not delivered:
-        await callback.message.answer(
+        await message.answer(
             "⚠️ Не удалось отправить уведомление менеджеру — он ещё не писал боту. "
             "Попросите его написать /start: после этого бот попросит номер телефона."
         )
@@ -295,8 +407,11 @@ async def list_users(message: Message, session: AsyncSession) -> None:
         role = ROLE_RU.get(u.role, u.role.value)
         name = html.escape(u.full_name or "—")
         uname = f" @{html.escape(u.tg_username)}" if u.tg_username else ""
-        region = f", регион #{u.region_id}" if u.region_id else ""
-        lines.append(f"{mark} {name}{uname} — {role}{region} (tg_id={u.tg_id})")
+        group = ""
+        if u.group_id:
+            g = await group_repo.get_by_id(session, u.group_id)
+            group = f", группа {html.escape(g.name)}" if g else f", группа #{u.group_id}"
+        lines.append(f"{mark} {name}{uname} — {role}{group} (tg_id={u.tg_id})")
     await message.answer("\n".join(lines))
 
 
@@ -333,26 +448,26 @@ async def _deactivate_user(message: Message, identifier: str, session: AsyncSess
         await message.answer("Нельзя деактивировать администратора через эту команду.")
         return
     await user_repo.set_active(session, user, False)
+    # Деактивированный менеджер освобождает группу.
+    if user.group_id is not None:
+        await user_repo.set_group(session, user, None)
     await message.answer(
         f"🚫 Пользователь {html.escape(user.full_name or str(user.tg_id))} деактивирован."
     )
 
 
 # --------------------------------------------------------------------------- #
-# Поля amoCRM
+# amoCRM
 # --------------------------------------------------------------------------- #
 
 @router.message(Command("amo_fields"), IsAdmin)
 async def amo_fields(message: Message, session: AsyncSession) -> None:
-    """Показывает кастомные поля сделок и контактов amoCRM с их ID.
-
-    Помогает настроить AMO_ADDRESS_FIELD_ID / AMO_PHONE_FIELD_ID в .env.
-    """
+    """Показывает кастомные поля сделок и контактов amoCRM с их ID."""
     client = AmoCRMClient(session)
     try:
         fields = await client.list_custom_fields()
     except AmoCRMError as exc:
-        await message.answer(f"❌ Ошибка amoCRM: {html.escape(str(exc))}")
+        await message.answer(f"❌ {html.escape(str(exc))}")
         return
     except Exception:  # noqa: BLE001
         logger.exception("Ошибка при получении полей amoCRM")
@@ -372,6 +487,50 @@ async def amo_fields(message: Message, session: AsyncSession) -> None:
         lines.append("")
 
     text = "\n".join(lines).strip()
-    # Telegram ограничивает длину сообщения ~4096 символов.
     for chunk_start in range(0, len(text), 3500):
         await message.answer(text[chunk_start:chunk_start + 3500])
+
+
+@router.message(Command("set_amo_code"), IsAdmin)
+async def set_amo_code(
+    message: Message, command: CommandObject, state: FSMContext, session: AsyncSession
+) -> None:
+    """Обновляет авторизацию amoCRM по новому коду (если refresh истёк)."""
+    if command.args:
+        await state.clear()
+        await _apply_amo_code(message, command.args.strip(), session)
+        return
+    await state.set_state(SetAmoCode.waiting_code)
+    await message.answer(
+        "Введите новый код авторизации amoCRM (из настроек интеграции):",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.message(SetAmoCode.waiting_code)
+async def set_amo_code_value(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    await state.clear()
+    await _apply_amo_code(message, (message.text or "").strip(), session)
+
+
+async def _apply_amo_code(message: Message, code: str, session: AsyncSession) -> None:
+    if not code:
+        await message.answer("Код не может быть пустым.")
+        return
+    client = AmoCRMClient(session)
+    if client.is_stub:
+        await message.answer(
+            "❌ Реквизиты интеграции amoCRM не заданы (subdomain/client_id/secret). "
+            "Заполните их в .env и перезапустите бота."
+        )
+        return
+    try:
+        await client.exchange_code(code)
+    except AmoCRMError as exc:
+        await message.answer(f"❌ {html.escape(str(exc))}")
+        return
+    except Exception:  # noqa: BLE001
+        logger.exception("Ошибка обмена кода авторизации amoCRM")
+        await message.answer("❌ Не удалось обменять код (см. логи).")
+        return
+    await message.answer("✅ Авторизация amoCRM обновлена.")
