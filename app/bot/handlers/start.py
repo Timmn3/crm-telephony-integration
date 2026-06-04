@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.db.models import User, UserRole
-from app.db.repositories import region_repo
+from app.db.repositories import group_repo
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +34,13 @@ HELP_BY_ROLE = {
     UserRole.ADMIN: (
         "<b>Команды администратора</b>\n"
         "/add_operator — добавить оператора\n"
-        "/add_manager — добавить менеджера (с привязкой к региону)\n"
-        "/add_region — создать регион\n"
-        "/regions — список регионов\n"
+        "/add_manager — добавить менеджера (с привязкой к группе)\n"
+        "/add_group — создать группу\n"
+        "/groups — список групп и их менеджеров\n"
         "/users — список пользователей\n"
         "/remove_user — деактивировать пользователя\n"
         "/amo_fields — показать поля сделки/контакта amoCRM\n"
+        "/set_amo_code — обновить код авторизации amoCRM\n"
         "/me — информация о себе"
     ),
     UserRole.OPERATOR: (
@@ -107,9 +108,13 @@ async def cmd_me(message: Message, user: User | None, session: AsyncSession) -> 
     ]
     if user.tg_username:
         lines.append(f"Username: @{html.escape(user.tg_username)}")
-    if user.region_id:
-        region = await region_repo.get_by_id(session, user.region_id)
-        lines.append(f"Регион: {html.escape(region.name) if region else '—'}")
+    if user.group_id:
+        group = await group_repo.get_by_id(session, user.group_id)
+        if group:
+            city = f", {html.escape(group.city)}" if group.city else ""
+            lines.append(f"Группа: {html.escape(group.name)}{city}")
+        else:
+            lines.append("Группа: —")
     if user.role == UserRole.MANAGER:
         lines.append(f"Телефон: {'сохранён ✓' if user.phone else 'не указан ✗'}")
 

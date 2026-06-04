@@ -1,7 +1,5 @@
-"""Обработчики действий менеджера.
-
-Блок 5: регистрация через «Поделиться контактом».
-Блоки 8/10: взятие заявки, запрос звонка, инициация звонка.
+"""Обработчики действий менеджера: регистрация (контакт), запрос звонка,
+инициация звонка, закрытие заявки.
 """
 from __future__ import annotations
 
@@ -17,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.filters.role import IsManager
 from app.bot.keyboards.inline import operator_call_request_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
-from app.db.models import Order, OrderStatus, User, UserRole
-from app.db.repositories import call_log_repo, order_repo, region_repo, user_repo
+from app.db.models import OrderStatus, User, UserRole
+from app.db.repositories import call_log_repo, group_repo, order_repo, user_repo
 from app.services import order_service
 from app.services.mango import MangoClient, MangoError
 from app.utils.phone import normalize_phone
@@ -28,24 +26,13 @@ logger = logging.getLogger(__name__)
 router = Router(name="manager")
 
 STATUS_RU = {
-    OrderStatus.SENT: "ожидает взятия",
-    OrderStatus.TAKEN: "взята",
+    OrderStatus.SENT: "новая",
     OrderStatus.CALL_REQUESTED: "запрошен звонок",
     OrderStatus.CALL_APPROVED: "звонок одобрен",
     OrderStatus.CALL_IN_PROGRESS: "звонок идёт",
     OrderStatus.COMPLETED: "закрыта",
     OrderStatus.CANCELLED: "отменена",
 }
-
-
-async def _manager_name(session: AsyncSession, order: Order) -> str | None:
-    """Имя менеджера заявки (для карточки)."""
-    if order.manager_tg_id is None:
-        return None
-    manager = await user_repo.get_by_tg_id(session, order.manager_tg_id)
-    if manager is None:
-        return None
-    return manager.full_name or (f"@{manager.tg_username}" if manager.tg_username else str(manager.tg_id))
 
 
 async def _notify(bot: Bot, tg_id: int, text: str, **kwargs) -> None:
@@ -60,7 +47,6 @@ async def _notify(bot: Bot, tg_id: int, text: str, **kwargs) -> None:
 async def on_contact(message: Message, user: User | None, session: AsyncSession) -> None:
     """Сохраняет номер менеджера из пересланного контакта."""
     if user is None or not user.is_active or user.role != UserRole.MANAGER:
-        # Контакт от не-менеджера нам не нужен.
         await message.answer("Спасибо, но номер телефона сейчас не требуется.",
                              reply_markup=remove_keyboard())
         return
@@ -85,58 +71,20 @@ async def on_contact(message: Message, user: User | None, session: AsyncSession)
 
     await user_repo.set_phone(session, user, phone)
 
-    region_name = "—"
-    if user.region_id:
-        region = await region_repo.get_by_id(session, user.region_id)
-        if region:
-            region_name = html.escape(region.name)
+    group_line = ""
+    if user.group_id:
+        group = await group_repo.get_by_id(session, user.group_id)
+        if group:
+            city = f", {html.escape(group.city)}" if group.city else ""
+            group_line = f"\nГруппа: <b>{html.escape(group.name)}</b>{city}."
 
     await message.answer(
-        "✅ Готово! Вы зарегистрированы как выездной менеджер.\n"
-        f"Регион: <b>{region_name}</b>.\n\n"
-        "Когда поступит заявка — вы получите карточку с кнопкой «Беру заявку».",
+        "✅ Готово! Вы зарегистрированы как выездной менеджер." + group_line +
+        "\n\nКогда поступит заявка — вы получите карточку с кнопкой "
+        "«Запросить звонок клиенту».",
         reply_markup=remove_keyboard(),
     )
     logger.info("Менеджер tg_id=%s завершил регистрацию (телефон сохранён)", user.tg_id)
-
-
-# --------------------------------------------------------------------------- #
-# Беру заявку (атомарно)
-# --------------------------------------------------------------------------- #
-
-@router.callback_query(F.data.startswith("take_order:"), IsManager)
-async def take_order(
-    callback: CallbackQuery, user: User, session: AsyncSession, bot: Bot
-) -> None:
-    order_id = int(callback.data.split(":")[1])
-    order = await order_repo.get_by_id(session, order_id)
-    if order is None:
-        await callback.answer("Заявка не найдена.", show_alert=True)
-        return
-
-    if user.region_id != order.region_id:
-        await callback.answer("Эта заявка не для вашего региона.", show_alert=True)
-        return
-
-    taken = await order_repo.try_take(session, order_id, user.tg_id)
-    if taken is None:
-        # Заявку уже забрал другой менеджер — обновим карточки и сообщим.
-        current = await order_repo.get_by_id(session, order_id)
-        await order_service.refresh_cards(
-            bot, session, current, manager_name=await _manager_name(session, current)
-        )
-        await callback.answer("Заявку уже взял другой менеджер.", show_alert=True)
-        return
-
-    await order_service.refresh_cards(bot, session, taken, manager_name=user.full_name)
-    await callback.answer("✅ Вы взяли заявку.")
-
-    name = user.full_name or (f"@{user.tg_username}" if user.tg_username else str(user.tg_id))
-    await _notify(
-        bot, taken.operator_tg_id,
-        f"📥 Менеджер {html.escape(name)} взял заявку #{taken.amo_lead_id}.",
-    )
-    logger.info("Заявка #%s взята менеджером tg_id=%s", order_id, user.tg_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -155,20 +103,21 @@ async def request_call(
     if order.manager_tg_id != user.tg_id:
         await callback.answer("Это не ваша заявка.", show_alert=True)
         return
-    if order.status not in (OrderStatus.TAKEN, OrderStatus.CALL_IN_PROGRESS):
+    if order.status not in (OrderStatus.SENT, OrderStatus.CALL_IN_PROGRESS):
         await callback.answer("Сейчас нельзя запросить звонок.", show_alert=True)
         return
 
     await order_repo.set_status(
         session, order, OrderStatus.CALL_REQUESTED, set_call_requested_at=True
     )
-    await order_service.refresh_cards(bot, session, order, manager_name=user.full_name)
+    await order_service.refresh_card(bot, order)
     await callback.answer("Запрос на звонок отправлен оператору.")
 
     name = user.full_name or (f"@{user.tg_username}" if user.tg_username else str(user.tg_id))
     await _notify(
         bot, order.operator_tg_id,
-        f"🔔 Менеджер {html.escape(name)} запрашивает звонок клиенту.\n"
+        f"🔔 <b>Запрос на звонок</b>\n"
+        f"Менеджер {html.escape(name)} просит разрешение позвонить клиенту.\n"
         f"Заявка #{order.amo_lead_id}\n"
         f"Клиент: {html.escape(order.client_name)}",
         reply_markup=operator_call_request_keyboard(order.id),
@@ -224,7 +173,7 @@ async def make_call(
         session, order_id=order.id, manager_tg_id=user.tg_id,
         mango_command_id=command_id, status="initiated",
     )
-    await order_service.refresh_cards(bot, session, order, manager_name=user.full_name)
+    await order_service.refresh_card(bot, order)
     await callback.answer()
     await _notify(
         bot, user.tg_id,
@@ -262,9 +211,7 @@ async def complete_order(
         return
 
     await order_repo.set_status(session, order, OrderStatus.COMPLETED)
-    await order_service.refresh_cards(
-        bot, session, order, manager_name=await _manager_name(session, order)
-    )
+    await order_service.refresh_card(bot, order)
     await callback.answer("✔️ Заявка закрыта.")
     logger.info("Заявка #%s закрыта пользователем tg_id=%s", order_id, user.tg_id)
 
