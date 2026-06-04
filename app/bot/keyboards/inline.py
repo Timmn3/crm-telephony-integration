@@ -83,6 +83,15 @@ def edit_group_field_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def confirm_delete_group_keyboard(group_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение физического удаления группы."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🗑 Подтвердить удаление", callback_data=f"confirm_del_group:{group_id}")
+    builder.button(text="❌ Отмена", callback_data="cancel_del_group")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def cancel_keyboard(callback_data: str = "cancel") -> InlineKeyboardMarkup:
     """Кнопка отмены."""
     return InlineKeyboardMarkup(

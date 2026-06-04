@@ -128,7 +128,7 @@ class Order(Base):
     client_address: Mapped[str | None] = mapped_column(String(512), nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     group_id: Mapped[int] = mapped_column(
-        ForeignKey("groups.id", ondelete="RESTRICT"), nullable=False
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
     )
     operator_tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Менеджер берётся автоматически из группы в момент отправки.

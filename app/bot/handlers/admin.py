@@ -1,7 +1,7 @@
 """Обработчики команд администратора.
 
-Команды: /add_group, /groups, /add_operator, /add_manager, /users,
-/remove_user, /amo_fields, /set_amo_code.
+Команды: /add_group, /groups, /edit_group, /delete_group, /add_operator,
+/add_manager, /users, /remove_user, /amo_fields, /set_amo_code.
 
 Примечание про Telegram: бот не может узнать tg_id по @username и не может
 написать пользователю первым, пока тот сам не обратится к боту. Способы добавить
@@ -24,15 +24,16 @@ from app.bot.commands import set_commands_for_user
 from app.bot.filters.role import IsAdmin
 from app.bot.keyboards.inline import (
     cancel_keyboard,
+    confirm_delete_group_keyboard,
     confirm_replace_keyboard,
     edit_group_field_keyboard,
     groups_keyboard,
     registration_keyboard,
 )
 from app.bot.keyboards.reply import phone_request_keyboard
-from app.bot.states import AddGroup, AddManager, AddOperator, EditGroup, RemoveUser, SetAmoCode
+from app.bot.states import AddGroup, AddManager, AddOperator, DeleteGroup, EditGroup, RemoveUser, SetAmoCode
 from app.db.models import User, UserRole
-from app.db.repositories import group_repo, pending_repo, user_repo
+from app.db.repositories import group_repo, order_repo, pending_repo, user_repo
 from app.services.amocrm import AmoCRMClient, AmoCRMError
 
 logger = logging.getLogger(__name__)
@@ -247,6 +248,100 @@ async def edit_group_value(message: Message, state: FSMContext, session: AsyncSe
         await message.answer(
             f"✅ Город группы «{html.escape(group.name)}» изменён на «{html.escape(group.city)}»."
         )
+
+
+# --------------------------------------------------------------------------- #
+# Удаление группы
+# --------------------------------------------------------------------------- #
+
+@router.message(Command("delete_group"), IsAdmin)
+async def delete_group_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    groups = await group_repo.list_all(session)
+    if not groups:
+        await message.answer("Групп нет — удалять нечего.")
+        return
+    await state.set_state(DeleteGroup.waiting_group)
+    await message.answer(
+        "Выберите группу для удаления:",
+        reply_markup=groups_keyboard(sorted(groups, key=lambda g: g.id), prefix="admin_del_group"),
+    )
+
+
+@router.callback_query(DeleteGroup.waiting_group, F.data.startswith("admin_del_group:"))
+async def delete_group_pick(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    group_id = int(callback.data.split(":")[1])
+    group = await group_repo.get_by_id(session, group_id)
+    if group is None:
+        await callback.answer("Группа не найдена.", show_alert=True)
+        await state.clear()
+        return
+
+    manager = await user_repo.get_active_manager_by_group(session, group_id)
+    all_users = await user_repo.list_by_group(session, group_id)
+    operators_in_group = [u for u in all_users if u.role.value == "operator"]
+    active_orders = await order_repo.count_active_by_group(session, group_id)
+    total_orders = await order_repo.count_total_by_group(session, group_id)
+
+    lines = [
+        f"⚠️ <b>Удаление группы «{html.escape(group.name)}»</b> (id={group.id})",
+        f"Город: {html.escape(group.city or '—')}",
+        "",
+    ]
+    if manager:
+        name = html.escape(manager.full_name or str(manager.tg_id))
+        lines.append(f"👤 Менеджер: {name} (tg_id={manager.tg_id}) — будет отвязан")
+    else:
+        lines.append("👤 Менеджер: не назначен")
+
+    if operators_in_group:
+        op_names = ", ".join(
+            html.escape(u.full_name or str(u.tg_id)) for u in operators_in_group
+        )
+        lines.append(f"👔 Операторы группы: {op_names} — будут отвязаны")
+    else:
+        lines.append("👔 Операторы группы: нет")
+
+    lines += [
+        "",
+        f"📋 Незакрытых заявок: <b>{active_orders}</b>",
+        f"📋 Всего заявок в истории: {total_orders} (будут удалены)",
+        "",
+        "Это действие <b>необратимо</b>. Подтвердить?",
+    ]
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=confirm_delete_group_keyboard(group_id),
+    )
+    await state.clear()
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("confirm_del_group:"))
+async def delete_group_confirm(callback: CallbackQuery, session: AsyncSession) -> None:
+    group_id = int(callback.data.split(":")[1])
+    group = await group_repo.get_by_id(session, group_id)
+    if group is None:
+        await callback.answer("Группа уже удалена.", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        return
+
+    unassigned = await user_repo.unassign_all_from_group(session, group_id)
+    group_name = group.name
+    await group_repo.delete(session, group)
+
+    lines = [f"🗑 Группа «{html.escape(group_name)}» удалена."]
+    if unassigned:
+        names = ", ".join(html.escape(u.full_name or str(u.tg_id)) for u in unassigned)
+        lines.append(f"Отвязаны пользователи: {names}.")
+    await callback.message.edit_text("\n".join(lines), reply_markup=None)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cancel_del_group")
+async def delete_group_cancel(callback: CallbackQuery) -> None:
+    await callback.message.edit_text("Удаление отменено.", reply_markup=None)
+    await callback.answer()
 
 
 # --------------------------------------------------------------------------- #

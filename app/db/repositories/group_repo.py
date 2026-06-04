@@ -67,3 +67,10 @@ async def set_active(session: AsyncSession, group: Group, active: bool) -> None:
 async def count(session: AsyncSession) -> int:
     result = await session.execute(select(Group))
     return len(list(result.scalars().all()))
+
+
+async def delete(session: AsyncSession, group: Group) -> None:
+    """Физически удаляет группу. Пользователей надо отвязать заранее."""
+    await session.delete(group)
+    await session.flush()
+    logger.info("Удалена группа id=%s name=%r", group.id, group.name)

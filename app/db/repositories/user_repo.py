@@ -140,3 +140,25 @@ async def unassign_from_group(session: AsyncSession, group_id: int) -> User | No
         logger.info("Менеджер tg_id=%s отвязан от группы id=%s",
                     manager.tg_id, group_id)
     return manager
+
+
+async def list_by_group(session: AsyncSession, group_id: int) -> list[User]:
+    """Все пользователи, привязанные к группе."""
+    result = await session.execute(
+        select(User).where(User.group_id == group_id).order_by(User.role, User.full_name)
+    )
+    return list(result.scalars().all())
+
+
+async def unassign_all_from_group(session: AsyncSession, group_id: int) -> list[User]:
+    """Отвязывает всех пользователей группы. Возвращает список отвязанных."""
+    users = await list_by_group(session, group_id)
+    for u in users:
+        u.group_id = None
+    if users:
+        await session.flush()
+        logger.info(
+            "Отвязано %d пользователей от группы id=%s: %s",
+            len(users), group_id, [u.tg_id for u in users],
+        )
+    return users

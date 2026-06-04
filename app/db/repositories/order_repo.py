@@ -100,6 +100,27 @@ async def list_active_by_operator(
     return list(result.scalars().all())
 
 
+async def count_active_by_group(session: AsyncSession, group_id: int) -> int:
+    """Количество незакрытых заявок группы."""
+    from sqlalchemy import func as sqlfunc
+    result = await session.execute(
+        select(sqlfunc.count()).select_from(Order).where(
+            Order.group_id == group_id,
+            Order.status.in_(ACTIVE_STATUSES),
+        )
+    )
+    return result.scalar_one()
+
+
+async def count_total_by_group(session: AsyncSession, group_id: int) -> int:
+    """Всего заявок группы (включая закрытые)."""
+    from sqlalchemy import func as sqlfunc
+    result = await session.execute(
+        select(sqlfunc.count()).select_from(Order).where(Order.group_id == group_id)
+    )
+    return result.scalar_one()
+
+
 async def list_active_by_manager(
     session: AsyncSession, manager_tg_id: int
 ) -> list[Order]:

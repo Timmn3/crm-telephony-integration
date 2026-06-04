@@ -36,5 +36,9 @@ class CreateOrder(StatesGroup):
     waiting_comment = State()
 
 
+class DeleteGroup(StatesGroup):
+    waiting_group = State()   # выбор группы из инлайн-кнопок
+
+
 class SetAmoCode(StatesGroup):
     waiting_code = State()
