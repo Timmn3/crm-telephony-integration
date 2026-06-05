@@ -14,7 +14,7 @@ def test_signature_matches_payload():
     command_id, form = build_callback_payload(
         api_key="KEY", api_salt="SALT",
         manager_phone="79990000001", client_phone="79990000002",
-        line_number="78001234567", order_id=42, command_id="cb_42_100",
+        extension="15", line_number="78001234567", order_id=42, command_id="cb_42_100",
     )
     expected = hashlib.sha256(("KEY" + form["json"] + "SALT").encode()).hexdigest()
     assert form["sign"] == expected

@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     mango_api_salt: str = Field("", alias="MANGO_API_SALT")
     mango_api_url: str = Field("https://app.mango-office.ru/vpbx", alias="MANGO_API_URL")
     mango_line_number: str = Field("", alias="MANGO_LINE_NUMBER")
+    mango_extension: str = Field("", alias="MANGO_EXTENSION")
 
     # ------------------------------------------------------------------ Сервер
     server_host: str = Field("0.0.0.0", alias="SERVER_HOST")

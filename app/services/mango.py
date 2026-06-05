@@ -28,23 +28,26 @@ def build_callback_payload(
     api_salt: str,
     manager_phone: str,
     client_phone: str,
-    line_number: str,
+    extension: str,
     order_id: int,
+    line_number: str = "",
     command_id: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Формирует (command_id, form-data) для callback-запроса к Mango.
 
     Телефоны — в формате 7XXXXXXXXXX.
+    extension — внутренний короткий номер сотрудника в ВАТС Mango (обязателен).
     """
     if command_id is None:
         command_id = f"cb_{order_id}_{int(time.time())}"
 
-    data = {
+    data: dict = {
         "command_id": command_id,
-        "from": {"extension": "", "number": manager_phone},
+        "from": {"extension": extension, "number": manager_phone},
         "to_number": client_phone,
-        "line_number": line_number,
     }
+    if line_number:
+        data["line_number"] = line_number
     json_str = json.dumps(data)
     sign = hashlib.sha256((api_key + json_str + api_salt).encode()).hexdigest()
     form = {
@@ -70,14 +73,15 @@ class MangoClient:
         ВАЖНО: номера клиента/менеджера не логируются.
         """
         if not (self.settings.mango_api_key and self.settings.mango_api_salt
-                and self.settings.mango_line_number):
-            raise MangoError("Не настроены параметры Mango (key/salt/line_number).")
+                and self.settings.mango_extension):
+            raise MangoError("Не настроены параметры Mango (key/salt/extension).")
 
         command_id, form = build_callback_payload(
             api_key=self.settings.mango_api_key,
             api_salt=self.settings.mango_api_salt,
             manager_phone=manager_phone,
             client_phone=client_phone,
+            extension=self.settings.mango_extension,
             line_number=self.settings.mango_line_number,
             order_id=order_id,
         )
@@ -100,6 +104,15 @@ class MangoClient:
         if status != 200:
             logger.error("Mango ответил %s (order=%s): %s", status, order_id, result)
             raise MangoError(f"Mango вернул ошибку (HTTP {status}).")
+
+        logger.info("Mango ответ (order=%s): %s", order_id, result)
+
+        result_code = result.get("result") if isinstance(result, dict) else None
+        if result_code not in (None, 0, "0"):
+            logger.error(
+                "Mango вернул код ошибки %s (order=%s)", result_code, order_id
+            )
+            raise MangoError(f"Mango вернул код ошибки: {result_code}")
 
         logger.info("Звонок инициирован через Mango: order=%s command_id=%s",
                     order_id, command_id)
