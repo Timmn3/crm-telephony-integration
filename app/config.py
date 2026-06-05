@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     amocrm_redirect_uri: str = Field("", alias="AMOCRM_REDIRECT_URI")
     # Одноразовый код авторизации — обменивается на токены при первом запуске.
     amocrm_auth_code: str = Field("", alias="AMOCRM_AUTH_CODE")
+    # Долгосрочный токен (до 2030) — альтернатива auth_code для деплоя с нуля.
+    # При старте записывается в БД если таблица пустая.
+    amocrm_long_token: str = Field("", alias="AMOCRM_LONG_TOKEN")
     amo_address_field_id: int | None = Field(None, alias="AMO_ADDRESS_FIELD_ID")
     amo_phone_field_id: int | None = Field(None, alias="AMO_PHONE_FIELD_ID")
     # Телефон синтетического клиента в режиме-заглушке (для отладки звонка).

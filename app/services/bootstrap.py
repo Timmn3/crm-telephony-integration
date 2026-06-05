@@ -4,7 +4,10 @@
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
+from datetime import datetime, timezone
 
 from app.config import get_settings
 from app.db.database import get_session
@@ -41,10 +44,24 @@ async def seed_groups() -> None:
         logger.info("Создано %s групп (seed)", len(INITIAL_GROUPS))
 
 
-async def ensure_amo_token() -> None:
-    """Обменивает AMOCRM_AUTH_CODE на токены при первом запуске.
+def _jwt_expires_at(token: str) -> datetime:
+    """Извлекает exp из JWT без внешних библиотек."""
+    payload_b64 = token.split(".")[1]
+    padding = (4 - len(payload_b64) % 4) % 4
+    payload = json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * padding))
+    return datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
 
-    Ничего не делает в режиме-заглушке или если токены уже есть.
+
+async def ensure_amo_token() -> None:
+    """Записывает токены amoCRM в БД при первом запуске если таблица пустая.
+
+    Приоритет источников:
+    1. Токен уже есть в БД — ничего не делаем.
+    2. AMOCRM_AUTH_CODE — обмениваем на access/refresh (стандартный OAuth).
+    3. AMOCRM_LONG_TOKEN — долгосрочный JWT, пишем напрямую в БД.
+    4. Ничего нет — предупреждение, бот не сможет обращаться к amoCRM.
+
+    Ничего не делает в режиме-заглушке (реквизиты интеграции не заданы).
     """
     settings = get_settings()
     if not settings.amocrm_configured:
@@ -55,18 +72,33 @@ async def ensure_amo_token() -> None:
         if existing is not None:
             logger.info("Токены amoCRM уже есть — обмен кода не требуется")
             return
-        if not settings.amocrm_auth_code:
-            logger.warning(
-                "amoCRM настроен, но нет токенов и AMOCRM_AUTH_CODE. "
-                "Авторизуйтесь командой /set_amo_code <code>."
-            )
+        if settings.amocrm_auth_code:
+            client = AmoCRMClient(session)
+            try:
+                await client.exchange_code(settings.amocrm_auth_code)
+                logger.info("Первичная авторизация amoCRM выполнена (auth_code)")
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Не удалось обменять AMOCRM_AUTH_CODE. Код мог истечь — "
+                    "получите новый и примените командой /set_amo_code."
+                )
             return
-        client = AmoCRMClient(session)
-        try:
-            await client.exchange_code(settings.amocrm_auth_code)
-            logger.info("Первичная авторизация amoCRM выполнена")
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "Не удалось обменять AMOCRM_AUTH_CODE. Код мог истечь — "
-                "получите новый и примените командой /set_amo_code."
+        if settings.amocrm_long_token:
+            try:
+                expires_at = _jwt_expires_at(settings.amocrm_long_token)
+            except Exception:  # noqa: BLE001
+                logger.exception("Не удалось разобрать AMOCRM_LONG_TOKEN как JWT.")
+                return
+            await amo_token_repo.save(
+                session,
+                access_token=settings.amocrm_long_token,
+                refresh_token=settings.amocrm_long_token,
+                expires_at=expires_at,
             )
+            await session.commit()
+            logger.info("Долгосрочный токен amoCRM записан в БД (до %s)", expires_at)
+            return
+        logger.warning(
+            "amoCRM настроен, но нет токенов, AMOCRM_AUTH_CODE и AMOCRM_LONG_TOKEN. "
+            "Авторизуйтесь командой /set_amo_code <code>."
+        )
