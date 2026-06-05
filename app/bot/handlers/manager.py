@@ -12,7 +12,8 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.filters.role import IsManager
+from app.bot.filters.role import IsAdmin
+from app.bot.utils import format_group_lines
 from app.bot.keyboards.inline import operator_call_request_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.db.models import OrderStatus, User, UserRole
@@ -46,7 +47,7 @@ async def _notify(bot: Bot, tg_id: int, text: str, **kwargs) -> None:
 @router.message(F.contact)
 async def on_contact(message: Message, user: User | None, session: AsyncSession) -> None:
     """Сохраняет номер менеджера из пересланного контакта."""
-    if user is None or not user.is_active or user.role != UserRole.MANAGER:
+    if user is None or not user.is_active or user.role != UserRole.ADMIN:
         await message.answer("Спасибо, но номер телефона сейчас не требуется.",
                              reply_markup=remove_keyboard())
         return
@@ -75,23 +76,22 @@ async def on_contact(message: Message, user: User | None, session: AsyncSession)
     if user.group_id:
         group = await group_repo.get_by_id(session, user.group_id)
         if group:
-            group_label = f"город: <b>{html.escape(group.city)}</b>, группа: {group.id}" if group.city else f"группа: {group.id}"
-            group_line = f"\n{group_label}."
+            group_line = f"\n{format_group_lines(group)}"
 
     await message.answer(
-        "✅ Готово! Вы зарегистрированы как выездной менеджер." + group_line +
+        "✅ Готово! Вы зарегистрированы как выездной администратор." + group_line +
         "\n\nКогда поступит заявка — вы получите карточку с кнопкой "
         "«Запросить звонок клиенту».",
         reply_markup=remove_keyboard(),
     )
-    logger.info("Менеджер tg_id=%s завершил регистрацию (телефон сохранён)", user.tg_id)
+    logger.info("Администратор tg_id=%s завершил регистрацию (телефон сохранён)", user.tg_id)
 
 
 # --------------------------------------------------------------------------- #
 # Запросить звонок
 # --------------------------------------------------------------------------- #
 
-@router.callback_query(F.data.startswith("request_call:"), IsManager)
+@router.callback_query(F.data.startswith("request_call:"), IsAdmin)
 async def request_call(
     callback: CallbackQuery, user: User, session: AsyncSession, bot: Bot
 ) -> None:
@@ -129,7 +129,7 @@ async def request_call(
 # Позвонить клиенту (через Mango)
 # --------------------------------------------------------------------------- #
 
-@router.callback_query(F.data.startswith("make_call:"), IsManager)
+@router.callback_query(F.data.startswith("make_call:"), IsAdmin)
 async def make_call(
     callback: CallbackQuery, user: User, session: AsyncSession, bot: Bot
 ) -> None:
@@ -202,9 +202,9 @@ async def complete_order(
         return
 
     allowed = (
-        user.role == UserRole.ADMIN
-        or (user.role == UserRole.MANAGER and order.manager_tg_id == user.tg_id)
-        or (user.role == UserRole.OPERATOR and order.operator_tg_id == user.tg_id)
+        user.role == UserRole.DIRECTOR
+        or (user.role == UserRole.ADMIN and order.manager_tg_id == user.tg_id)
+        or (user.role == UserRole.MANAGER and order.operator_tg_id == user.tg_id)
     )
     if not allowed:
         await callback.answer("Нет доступа к этой заявке.", show_alert=True)
@@ -220,7 +220,7 @@ async def complete_order(
 # /my_tasks
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("my_tasks"), IsManager)
+@router.message(Command("my_tasks"), IsAdmin)
 async def my_tasks(message: Message, user: User, session: AsyncSession) -> None:
     orders = await order_repo.list_active_by_manager(session, user.tg_id)
     if not orders:

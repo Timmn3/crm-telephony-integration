@@ -37,14 +37,22 @@ async def _save_valid_token(session) -> None:
 
 async def test_stub_mode_returns_fake_client(session):
     """Без реквизитов интеграции — синтетический клиент, без обращения к сети."""
-    client = AmoCRMClient(session)
-    assert client.is_stub is True
-    data = await client.get_order_data(424242)
-    assert data.amo_lead_id == 424242
-    # Телефон-заглушка берётся из настроек (AMOCRM_STUB_PHONE).
-    assert data.client_phone == get_settings().amocrm_stub_phone
-    assert data.client_phone  # не пустой
-    assert "Тестовый" in data.client_name
+    s = get_settings()
+    saved = (s.amocrm_subdomain, s.amocrm_client_id, s.amocrm_client_secret)
+    s.amocrm_subdomain = ""
+    s.amocrm_client_id = ""
+    s.amocrm_client_secret = ""
+    try:
+        client = AmoCRMClient(session)
+        assert client.is_stub is True
+        data = await client.get_order_data(424242)
+        assert data.amo_lead_id == 424242
+        # Телефон-заглушка берётся из настроек (AMOCRM_STUB_PHONE).
+        assert data.client_phone == get_settings().amocrm_stub_phone
+        assert data.client_phone  # не пустой
+        assert "Тестовый" in data.client_name
+    finally:
+        s.amocrm_subdomain, s.amocrm_client_id, s.amocrm_client_secret = saved
 
 
 async def test_get_order_data_parses_lead_and_contact(session):

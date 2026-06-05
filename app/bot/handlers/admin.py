@@ -1,11 +1,11 @@
-"""Обработчики команд администратора.
+"""Обработчики команд директора.
 
-Команды: /add_group, /groups, /edit_group, /delete_group, /add_operator,
-/add_manager, /users, /remove_user, /amo_fields, /set_amo_code.
+Команды: /add_group, /groups, /edit_group, /delete_group, /add_manager,
+/add_admin, /users, /remove_user, /amo_fields, /set_amo_code.
 
 Примечание про Telegram: бот не может узнать tg_id по @username и не может
 написать пользователю первым, пока тот сам не обратится к боту. Способы добавить
-менеджера: переслать боту его сообщение (из пересылки берём tg_id) либо ввести
+администратора: переслать боту его сообщение (из пересылки берём tg_id) либо ввести
 числовой Telegram ID. @username работает только для уже известных боту.
 """
 from __future__ import annotations
@@ -21,17 +21,17 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.commands import set_commands_for_user
-from app.bot.filters.role import IsAdmin
+from app.bot.utils import format_group_lines
+from app.bot.filters.role import IsDirector
 from app.bot.keyboards.inline import (
     cancel_keyboard,
     confirm_delete_group_keyboard,
-    confirm_replace_keyboard,
     edit_group_field_keyboard,
     groups_keyboard,
     registration_keyboard,
 )
 from app.bot.keyboards.reply import phone_request_keyboard
-from app.bot.states import AddGroup, AddManager, AddOperator, DeleteGroup, EditGroup, RemoveUser, SetAmoCode
+from app.bot.states import AddAdmin, AddGroup, AddManager, DeleteGroup, EditGroup, RemoveUser, SetAmoCode
 from app.db.models import User, UserRole
 from app.db.repositories import group_repo, order_repo, pending_repo, user_repo
 from app.services.amocrm import AmoCRMClient, AmoCRMError
@@ -41,9 +41,9 @@ logger = logging.getLogger(__name__)
 router = Router(name="admin")
 
 ROLE_RU = {
-    UserRole.ADMIN: "администратор",
-    UserRole.OPERATOR: "оператор",
+    UserRole.DIRECTOR: "директор",
     UserRole.MANAGER: "менеджер",
+    UserRole.ADMIN: "администратор",
 }
 
 
@@ -94,7 +94,7 @@ async def _notify_new_user(bot: Bot, tg_id: int, text: str, **kwargs) -> bool:
 # Группы
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("add_group"), IsAdmin)
+@router.message(Command("add_group"), IsDirector)
 async def add_group_start(
     message: Message, command: CommandObject, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -144,7 +144,7 @@ async def _create_group(message: Message, name: str, city: str, session: AsyncSe
     )
 
 
-@router.message(Command("groups"), IsAdmin)
+@router.message(Command("groups"), IsDirector)
 async def list_groups(message: Message, session: AsyncSession) -> None:
     groups = await group_repo.list_all(session)
     if not groups:
@@ -153,12 +153,14 @@ async def list_groups(message: Message, session: AsyncSession) -> None:
     lines = ["<b>Группы:</b>"]
     for g in sorted(groups, key=lambda x: x.id):
         mark = "✅" if g.is_active else "🚫"
-        manager = await user_repo.get_active_manager_by_group(session, g.id)
-        who = "свободна"
-        if manager is not None:
-            who = manager.full_name or (
-                f"@{manager.tg_username}" if manager.tg_username else str(manager.tg_id)
+        admins = await user_repo.list_active_admins_by_group(session, g.id)
+        if admins:
+            who = ", ".join(
+                a.full_name or (f"@{a.tg_username}" if a.tg_username else str(a.tg_id))
+                for a in admins
             )
+        else:
+            who = "нет админов"
         lines.append(
             f"{mark} #{g.id} <b>{html.escape(g.name)}</b> "
             f"({html.escape(g.city or '—')}) — {html.escape(who)}"
@@ -170,7 +172,7 @@ async def list_groups(message: Message, session: AsyncSession) -> None:
 # Редактирование группы
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("edit_group"), IsAdmin)
+@router.message(Command("edit_group"), IsDirector)
 async def edit_group_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
     groups = await group_repo.list_all(session)
     if not groups:
@@ -254,7 +256,7 @@ async def edit_group_value(message: Message, state: FSMContext, session: AsyncSe
 # Удаление группы
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("delete_group"), IsAdmin)
+@router.message(Command("delete_group"), IsDirector)
 async def delete_group_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
     groups = await group_repo.list_all(session)
     if not groups:
@@ -276,9 +278,7 @@ async def delete_group_pick(callback: CallbackQuery, state: FSMContext, session:
         await state.clear()
         return
 
-    manager = await user_repo.get_active_manager_by_group(session, group_id)
-    all_users = await user_repo.list_by_group(session, group_id)
-    operators_in_group = [u for u in all_users if u.role.value == "operator"]
+    bound_users = await user_repo.list_by_group(session, group_id)
     active_orders = await order_repo.count_active_by_group(session, group_id)
     total_orders = await order_repo.count_total_by_group(session, group_id)
 
@@ -287,19 +287,13 @@ async def delete_group_pick(callback: CallbackQuery, state: FSMContext, session:
         f"Город: {html.escape(group.city or '—')}",
         "",
     ]
-    if manager:
-        name = html.escape(manager.full_name or str(manager.tg_id))
-        lines.append(f"👤 Менеджер: {name} (tg_id={manager.tg_id}) — будет отвязан")
-    else:
-        lines.append("👤 Менеджер: не назначен")
-
-    if operators_in_group:
-        op_names = ", ".join(
-            html.escape(u.full_name or str(u.tg_id)) for u in operators_in_group
+    if bound_users:
+        names = ", ".join(
+            html.escape(u.full_name or str(u.tg_id)) for u in bound_users
         )
-        lines.append(f"👔 Операторы группы: {op_names} — будут отвязаны")
+        lines.append(f"👤 Привязанные пользователи: {names} — будут отвязаны")
     else:
-        lines.append("👔 Операторы группы: нет")
+        lines.append("👤 Привязанных пользователей нет")
 
     lines += [
         "",
@@ -345,100 +339,63 @@ async def delete_group_cancel(callback: CallbackQuery) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Операторы
+# Менеджеры
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("add_operator"), IsAdmin)
-async def add_operator_start(
+@router.message(Command("add_manager"), IsDirector)
+async def add_manager_start(
     message: Message, command: CommandObject, state: FSMContext,
     session: AsyncSession, bot: Bot,
 ) -> None:
     if command.args:
-        await _resolve_operator_target(message, command.args.strip(), state, session)
+        await _resolve_manager_target(message, command.args.strip(), state, session, bot)
         return
-    await state.set_state(AddOperator.waiting_tg_id)
+    await state.set_state(AddManager.waiting_tg_id)
     await message.answer(
-        "Введите Telegram ID нового оператора (число) или @username, "
+        "Введите Telegram ID нового менеджера (число) или @username, "
         "если он уже писал боту.\n\n"
         "ℹ️ Узнать свой ID пользователь может, написав боту /start.",
         reply_markup=cancel_keyboard(),
     )
 
 
-@router.message(AddOperator.waiting_tg_id)
-async def add_operator_id(
+@router.message(AddManager.waiting_tg_id)
+async def add_manager_id(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     await state.clear()
-    await _resolve_operator_target(message, (message.text or "").strip(), state, session)
+    await _resolve_manager_target(message, (message.text or "").strip(), state, session, bot)
 
 
-async def _resolve_operator_target(
-    message: Message, identifier: str, state: FSMContext, session: AsyncSession
+async def _resolve_manager_target(
+    message: Message, identifier: str, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     user, tg_id, error = await _resolve_target(session, identifier)
     if error:
         await message.answer(f"❌ {error}")
         await state.clear()
         return
-    await _offer_operator_groups(message, state, session, tg_id=tg_id)
-
-
-async def _offer_operator_groups(
-    message: Message, state: FSMContext, session: AsyncSession, *, tg_id: int
-) -> None:
-    groups = await group_repo.list_active(session)
-    if not groups:
-        await message.answer("Сначала создайте хотя бы одну группу: /add_group <название> <город>")
-        await state.clear()
-        return
-    await state.update_data(operator_tg_id=tg_id)
-    await state.set_state(AddOperator.waiting_group)
-    await message.answer(
-        "Выберите группу для оператора:",
-        reply_markup=groups_keyboard(groups, prefix="admin_op_group"),
-    )
-
-
-@router.callback_query(AddOperator.waiting_group, F.data.startswith("admin_op_group:"))
-async def add_operator_group(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
-) -> None:
-    group_id = int(callback.data.split(":")[1])
-    group = await group_repo.get_by_id(session, group_id)
-    data = await state.get_data()
-    tg_id = data.get("operator_tg_id")
     await state.clear()
-
-    if group is None or tg_id is None:
-        await callback.message.edit_text("❌ Ошибка: данные не найдены.")
-        await callback.answer()
-        return
-
-    await _assign_operator(callback.message, session, bot, tg_id, group)
-    await callback.answer()
+    await _assign_manager_role(message, session, bot, tg_id)
 
 
-async def _assign_operator(
-    message: Message, session: AsyncSession, bot: Bot, tg_id: int, group
+async def _assign_manager_role(
+    message: Message, session: AsyncSession, bot: Bot, tg_id: int
 ) -> None:
+    """Выдаёт роль менеджера (создателя заявок). К группе менеджер не привязан."""
     user = await user_repo.get_by_tg_id(session, tg_id)
     if user is not None:
-        await user_repo.set_role(session, user, UserRole.OPERATOR)
-        await user_repo.set_group(session, user, group.id)
+        await user_repo.set_role(session, user, UserRole.MANAGER)
         await user_repo.set_active(session, user, True)
     else:
-        await user_repo.create(
-            session, tg_id=tg_id, role=UserRole.OPERATOR, full_name="", group_id=group.id
-        )
+        await user_repo.create(session, tg_id=tg_id, role=UserRole.MANAGER, full_name="")
     await pending_repo.delete(session, tg_id)
 
-    gname = html.escape(group.name)
-    await message.edit_text(f"✅ Оператор добавлен (tg_id={tg_id}), группа: {gname}.")
-    await set_commands_for_user(bot, tg_id, UserRole.OPERATOR)
+    await message.answer(f"✅ Менеджер добавлен (tg_id={tg_id}).")
+    await set_commands_for_user(bot, tg_id, UserRole.MANAGER)
     delivered = await _notify_new_user(
         bot, tg_id,
-        "✅ Вам выдан доступ <b>оператора</b>. Отправьте /start, чтобы начать работу.",
+        "✅ Вам выдан доступ <b>менеджера</b>. Отправьте /start, чтобы начать работу.",
     )
     if not delivered:
         await message.answer(
@@ -448,27 +405,27 @@ async def _assign_operator(
 
 
 # --------------------------------------------------------------------------- #
-# Менеджеры
+# Администраторы
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("add_manager"), IsAdmin)
-async def add_manager_start(
+@router.message(Command("add_admin"), IsDirector)
+async def add_admin_start(
     message: Message, command: CommandObject, state: FSMContext, session: AsyncSession
 ) -> None:
     if command.args:
-        await _resolve_manager_target(message, command.args.strip(), state, session)
+        await _resolve_admin_target(message, command.args.strip(), state, session)
         return
-    await state.set_state(AddManager.waiting_target)
+    await state.set_state(AddAdmin.waiting_target)
     await message.answer(
-        "Перешлите сообщение от нового менеджера или введите его @username / "
+        "Перешлите сообщение от нового администратора или введите его @username / "
         "числовой Telegram ID.\n\n"
         "ℹ️ Пересланное сообщение позволяет боту узнать его ID автоматически.",
         reply_markup=cancel_keyboard(),
     )
 
 
-@router.message(AddManager.waiting_target)
-async def add_manager_target(
+@router.message(AddAdmin.waiting_target)
+async def add_admin_target(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
     # 1) Пересланное сообщение — берём отправителя.
@@ -477,17 +434,17 @@ async def add_manager_target(
         full_name = fwd.full_name or ""
         username = fwd.username
         existing = await user_repo.get_by_tg_id(session, fwd.id)
-        await _offer_groups(
+        await _offer_admin_groups(
             message, state, session,
             tg_id=fwd.id, full_name=full_name, username=username,
             existing=existing,
         )
         return
     # 2) Текст: @username или tg_id.
-    await _resolve_manager_target(message, (message.text or "").strip(), state, session)
+    await _resolve_admin_target(message, (message.text or "").strip(), state, session)
 
 
-async def _resolve_manager_target(
+async def _resolve_admin_target(
     message: Message, identifier: str, state: FSMContext, session: AsyncSession
 ) -> None:
     user, tg_id, error = await _resolve_target(session, identifier)
@@ -495,7 +452,7 @@ async def _resolve_manager_target(
         await message.answer(f"❌ {error}")
         await state.clear()
         return
-    await _offer_groups(
+    await _offer_admin_groups(
         message, state, session,
         tg_id=tg_id,
         full_name=user.full_name if user else "",
@@ -504,7 +461,7 @@ async def _resolve_manager_target(
     )
 
 
-async def _offer_groups(
+async def _offer_admin_groups(
     message: Message, state: FSMContext, session: AsyncSession,
     *, tg_id: int, full_name: str, username: str | None, existing: User | None,
 ) -> None:
@@ -514,104 +471,62 @@ async def _offer_groups(
         await state.clear()
         return
     await state.update_data(
-        manager_tg_id=tg_id, manager_full_name=full_name, manager_username=username
+        admin_tg_id=tg_id, admin_full_name=full_name, admin_username=username
     )
-    await state.set_state(AddManager.waiting_group)
+    await state.set_state(AddAdmin.waiting_group)
     await message.answer(
-        "Выберите группу для менеджера:",
-        reply_markup=groups_keyboard(groups, prefix="admin_group"),
+        "Выберите группу для администратора:",
+        reply_markup=groups_keyboard(groups, prefix="admin_adm_group"),
     )
 
 
-@router.callback_query(AddManager.waiting_group, F.data.startswith("admin_group:"))
-async def add_manager_group(
+@router.callback_query(AddAdmin.waiting_group, F.data.startswith("admin_adm_group:"))
+async def add_admin_group(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     group_id = int(callback.data.split(":")[1])
     group = await group_repo.get_by_id(session, group_id)
     data = await state.get_data()
-    tg_id = data.get("manager_tg_id")
+    tg_id = data.get("admin_tg_id")
     if group is None or tg_id is None:
         await state.clear()
         await callback.message.edit_text("❌ Ошибка: группа не найдена.")
         await callback.answer()
         return
 
-    current = await user_repo.get_active_manager_by_group(session, group_id)
-    if current is not None and current.tg_id != tg_id:
-        # Группа занята — спрашиваем подтверждение замены.
-        await state.update_data(group_id=group_id)
-        await state.set_state(AddManager.waiting_replace)
-        cur_name = current.full_name or (
-            f"@{current.tg_username}" if current.tg_username else str(current.tg_id)
-        )
-        await callback.message.edit_text(
-            f"В группе «{html.escape(group.name)}» сейчас работает "
-            f"<b>{html.escape(cur_name)}</b>. Заменить его на нового менеджера?",
-            reply_markup=confirm_replace_keyboard(tg_id, group_id),
-        )
-        await callback.answer()
-        return
-
-    await _assign_manager(callback.message, state, session, bot, group_id)
+    # В группе может быть несколько выездных админов — просто добавляем нового.
+    await _assign_admin(callback.message, state, session, bot, group_id)
     await callback.answer()
 
 
-@router.callback_query(AddManager.waiting_replace, F.data.startswith("confirm_replace:"))
-async def add_manager_replace(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
-) -> None:
-    data = await state.get_data()
-    group_id = data.get("group_id")
-    if group_id is None:
-        await state.clear()
-        await callback.message.edit_text("❌ Ошибка: группа не определена.")
-        await callback.answer()
-        return
-    # Отвязываем прежнего менеджера (group_id=NULL), оставляя активным.
-    previous = await user_repo.unassign_from_group(session, group_id)
-    if previous is not None:
-        await _notify_new_user(
-            bot, previous.tg_id,
-            "ℹ️ Вы откреплены от группы. Новые заявки по ней приходить не будут.",
-        )
-    await _assign_manager(callback.message, state, session, bot, group_id)
-    await callback.answer()
-
-
-async def _assign_manager(
+async def _assign_admin(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot, group_id: int
 ) -> None:
     data = await state.get_data()
-    tg_id = data["manager_tg_id"]
-    full_name = data.get("manager_full_name") or ""
-    username = data.get("manager_username")
+    tg_id = data["admin_tg_id"]
+    full_name = data.get("admin_full_name") or ""
+    username = data.get("admin_username")
     await state.clear()
 
     group = await group_repo.get_by_id(session, group_id)
     user = await user_repo.get_by_tg_id(session, tg_id)
     if user is not None:
-        await user_repo.set_role(session, user, UserRole.MANAGER)
+        await user_repo.set_role(session, user, UserRole.ADMIN)
         await user_repo.set_group(session, user, group_id)
         await user_repo.set_active(session, user, True)
     else:
         user = await user_repo.create(
-            session, tg_id=tg_id, role=UserRole.MANAGER,
+            session, tg_id=tg_id, role=UserRole.ADMIN,
             full_name=full_name, tg_username=username, group_id=group_id,
         )
     await pending_repo.delete(session, tg_id)
 
     has_phone = bool(user.phone)
-    if group:
-        group_label = f"город: {html.escape(group.city)}, группа: {group.id}" if group.city else f"группа: {group.id}"
-    else:
-        group_label = f"группа: {group_id}"
-    await message.edit_text(f"✅ Менеджер добавлен (tg_id={tg_id}), {group_label}.")
+    group_info = format_group_lines(group) if group else f"Группа: #{group_id}"
+    await message.edit_text(f"✅ Администратор добавлен (tg_id={tg_id}).\n{group_info}")
 
-    await set_commands_for_user(bot, tg_id, UserRole.MANAGER)
-    text = (
-        f"✅ Вас назначили выездным менеджером, {group_label}.\n\n"
-    )
+    await set_commands_for_user(bot, tg_id, UserRole.ADMIN)
+    text = f"✅ Вас назначили администратором.\n{group_info}\n\n"
     if has_phone:
         text += "Телефон уже сохранён — можно принимать заявки."
         delivered = await _notify_new_user(bot, tg_id, text)
@@ -621,7 +536,7 @@ async def _assign_manager(
 
     if not delivered:
         await message.answer(
-            "⚠️ Не удалось отправить уведомление менеджеру — он ещё не писал боту. "
+            "⚠️ Не удалось отправить уведомление администратору — он ещё не писал боту. "
             "Попросите его написать /start: после этого бот попросит номер телефона."
         )
 
@@ -630,26 +545,27 @@ async def _assign_manager(
 # Быстрое назначение роли из уведомления о новом обращении (/start незнакомца)
 # --------------------------------------------------------------------------- #
 
-@router.callback_query(F.data.startswith("reg_op:"), IsAdmin)
-async def reg_assign_operator(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+@router.callback_query(F.data.startswith("reg_mgr:"), IsDirector)
+async def reg_assign_manager(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
-    """Кнопка «Оператор» в карточке нового обращения — запускаем выбор группы."""
+    """Кнопка «Менеджер» в карточке нового обращения — выдаём роль сразу."""
     tg_id = int(callback.data.split(":")[1])
     if callback.message:
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest:
             pass
-        await _offer_operator_groups(callback.message, state, session, tg_id=tg_id)
+        await state.clear()
+        await _assign_manager_role(callback.message, session, bot, tg_id)
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("reg_mgr:"), IsAdmin)
-async def reg_assign_manager(
+@router.callback_query(F.data.startswith("reg_adm:"), IsDirector)
+async def reg_assign_admin(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    """Кнопка «Менеджер» — запускаем выбор группы (далее штатный флоу AddManager)."""
+    """Кнопка «Администратор» — запускаем выбор группы (далее штатный флоу AddAdmin)."""
     tg_id = int(callback.data.split(":")[1])
     existing = await user_repo.get_by_tg_id(session, tg_id)
     if callback.message:
@@ -658,7 +574,7 @@ async def reg_assign_manager(
             await callback.message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest:
             pass
-        await _offer_groups(
+        await _offer_admin_groups(
             callback.message, state, session,
             tg_id=tg_id,
             full_name=existing.full_name if existing else "",
@@ -668,19 +584,19 @@ async def reg_assign_manager(
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("reg_ignore:"), IsAdmin)
+@router.callback_query(F.data.startswith("reg_ignore:"), IsDirector)
 async def reg_ignore(callback: CallbackQuery, session: AsyncSession) -> None:
     """Кнопка «Пропустить» — убираем карточку и обращение из очереди."""
     tg_id = int(callback.data.split(":")[1])
     await pending_repo.delete(session, tg_id)
     if callback.message:
         await callback.message.edit_text(
-            "Обращение пропущено. Назначить роль позже: /add_operator или /add_manager."
+            "Обращение пропущено. Назначить роль позже: /add_manager или /add_admin."
         )
     await callback.answer()
 
 
-@router.message(Command("pending"), IsAdmin)
+@router.message(Command("pending"), IsDirector)
 async def list_pending(message: Message, session: AsyncSession) -> None:
     """Список необработанных обращений с кнопками назначения роли."""
     pending = await pending_repo.list_all(session)
@@ -704,7 +620,7 @@ async def list_pending(message: Message, session: AsyncSession) -> None:
 # Список пользователей и деактивация
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("users"), IsAdmin)
+@router.message(Command("users"), IsDirector)
 async def list_users(message: Message, session: AsyncSession) -> None:
     users = await user_repo.list_all(session)
     if not users:
@@ -724,7 +640,7 @@ async def list_users(message: Message, session: AsyncSession) -> None:
     await message.answer("\n".join(lines))
 
 
-@router.message(Command("remove_user"), IsAdmin)
+@router.message(Command("remove_user"), IsDirector)
 async def remove_user_start(
     message: Message, command: CommandObject, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -753,8 +669,8 @@ async def _deactivate_user(message: Message, identifier: str, session: AsyncSess
     if user is None:
         await message.answer("Пользователь не найден в системе.")
         return
-    if user.role == UserRole.ADMIN:
-        await message.answer("Нельзя деактивировать администратора через эту команду.")
+    if user.role == UserRole.DIRECTOR:
+        await message.answer("Нельзя деактивировать директора через эту команду.")
         return
     await user_repo.set_active(session, user, False)
     # Деактивированный менеджер освобождает группу.
@@ -769,7 +685,7 @@ async def _deactivate_user(message: Message, identifier: str, session: AsyncSess
 # amoCRM
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("amo_fields"), IsAdmin)
+@router.message(Command("amo_fields"), IsDirector)
 async def amo_fields(message: Message, session: AsyncSession) -> None:
     """Показывает кастомные поля сделок и контактов amoCRM с их ID."""
     client = AmoCRMClient(session)
@@ -800,7 +716,7 @@ async def amo_fields(message: Message, session: AsyncSession) -> None:
         await message.answer(text[chunk_start:chunk_start + 3500])
 
 
-@router.message(Command("set_amo_code"), IsAdmin)
+@router.message(Command("set_amo_code"), IsDirector)
 async def set_amo_code(
     message: Message, command: CommandObject, state: FSMContext, session: AsyncSession
 ) -> None:

@@ -24,7 +24,7 @@ class RoleFilter(BaseFilter):
 
 
 # Готовые фильтры для удобства.
-IsAdmin = RoleFilter(UserRole.ADMIN)
-IsOperator = RoleFilter(UserRole.OPERATOR)
+IsDirector = RoleFilter(UserRole.DIRECTOR)
 IsManager = RoleFilter(UserRole.MANAGER)
-IsOperatorOrAdmin = RoleFilter(UserRole.OPERATOR, UserRole.ADMIN)
+IsAdmin = RoleFilter(UserRole.ADMIN)
+IsManagerOrDirector = RoleFilter(UserRole.MANAGER, UserRole.DIRECTOR)

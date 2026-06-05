@@ -13,12 +13,12 @@ from app.db.repositories import user_repo
 logger = logging.getLogger(__name__)
 
 _COMMANDS: dict[UserRole, list[BotCommand]] = {
-    UserRole.ADMIN: [
+    UserRole.DIRECTOR: [
         BotCommand(command="start", description="Главное меню"),
-        BotCommand(command="add_operator", description="Добавить оператора"),
         BotCommand(command="add_manager", description="Добавить менеджера"),
+        BotCommand(command="add_admin", description="Добавить администратора"),
         BotCommand(command="add_group", description="Создать группу"),
-        BotCommand(command="groups", description="Список групп и менеджеров"),
+        BotCommand(command="groups", description="Список групп и администраторов"),
         BotCommand(command="edit_group", description="Редактировать группу"),
         BotCommand(command="delete_group", description="Удалить группу"),
         BotCommand(command="pending", description="Необработанные обращения"),
@@ -29,14 +29,14 @@ _COMMANDS: dict[UserRole, list[BotCommand]] = {
         BotCommand(command="me", description="Информация о себе"),
         BotCommand(command="cancel", description="Отменить текущее действие"),
     ],
-    UserRole.OPERATOR: [
+    UserRole.MANAGER: [
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="order", description="Создать заявку"),
         BotCommand(command="my_orders", description="Мои активные заявки"),
         BotCommand(command="me", description="Информация о себе"),
         BotCommand(command="cancel", description="Отменить текущее действие"),
     ],
-    UserRole.MANAGER: [
+    UserRole.ADMIN: [
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="my_tasks", description="Мои заявки"),
         BotCommand(command="me", description="Информация о себе"),

@@ -117,29 +117,22 @@ async def list_all(session: AsyncSession) -> list[User]:
     return list(result.scalars().all())
 
 
-async def get_active_manager_by_group(
+async def list_active_admins_by_group(
     session: AsyncSession, group_id: int
-) -> User | None:
-    """Активный менеджер, назначенный на группу (в группе он максимум один)."""
+) -> list[User]:
+    """Активные выездные администраторы (UserRole.ADMIN) группы.
+
+    В группе их может быть несколько — заявка адресуется одному из них (выбор
+    делает менеджер при создании).
+    """
     result = await session.execute(
         select(User).where(
-            User.role == UserRole.MANAGER,
+            User.role == UserRole.ADMIN,
             User.group_id == group_id,
             User.is_active.is_(True),
-        ).order_by(User.id)
+        ).order_by(User.full_name)
     )
-    return result.scalars().first()
-
-
-async def unassign_from_group(session: AsyncSession, group_id: int) -> User | None:
-    """Отвязывает текущего менеджера группы (group_id=NULL). Возвращает его."""
-    manager = await get_active_manager_by_group(session, group_id)
-    if manager is not None:
-        manager.group_id = None
-        await session.flush()
-        logger.info("Менеджер tg_id=%s отвязан от группы id=%s",
-                    manager.tg_id, group_id)
-    return manager
+    return list(result.scalars().all())
 
 
 async def list_by_group(session: AsyncSession, group_id: int) -> list[User]:

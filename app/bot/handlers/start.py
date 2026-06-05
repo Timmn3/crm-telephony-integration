@@ -13,6 +13,7 @@ from aiogram.types import User as TgUser
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.commands import set_commands_for_user
+from app.bot.utils import format_group_lines
 from app.bot.keyboards.inline import registration_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.config import get_settings
@@ -79,20 +80,20 @@ async def _notify_admins_new_user(
             logger.warning("Не удалось уведомить админа %s о новом обращении: %s", admin_id, exc)
 
 ROLE_TITLES = {
+    UserRole.DIRECTOR: "директор",
+    UserRole.MANAGER: "менеджер",
     UserRole.ADMIN: "администратор",
-    UserRole.OPERATOR: "оператор отдела продаж",
-    UserRole.MANAGER: "выездной менеджер",
 }
 
 HELP_BY_ROLE = {
-    UserRole.ADMIN: (
-        "<b>Команды администратора</b>\n"
-        "/add_operator — добавить оператора\n"
-        "/add_manager — добавить менеджера (с привязкой к группе)\n"
+    UserRole.DIRECTOR: (
+        "<b>Команды директора</b>\n"
+        "/add_manager — добавить менеджера\n"
+        "/add_admin — добавить администратора (с привязкой к группе)\n"
         "/add_group — создать группу\n"
         "/edit_group — редактировать группу\n"
         "/delete_group — удалить группу\n"
-        "/groups — список групп и их менеджеров\n"
+        "/groups — список групп и их администраторов\n"
         "/pending — необработанные обращения\n"
         "/users — список пользователей\n"
         "/remove_user — деактивировать пользователя\n"
@@ -100,14 +101,14 @@ HELP_BY_ROLE = {
         "/set_amo_code — обновить код авторизации amoCRM\n"
         "/me — информация о себе"
     ),
-    UserRole.OPERATOR: (
-        "<b>Команды оператора</b>\n"
+    UserRole.MANAGER: (
+        "<b>Команды менеджера</b>\n"
         "/order — создать новую заявку\n"
         "/my_orders — мои активные заявки\n"
         "/me — информация о себе"
     ),
-    UserRole.MANAGER: (
-        "<b>Команды менеджера</b>\n"
+    UserRole.ADMIN: (
+        "<b>Команды администратора</b>\n"
         "/my_tasks — мои заявки\n"
         "/me — информация о себе"
     ),
@@ -130,7 +131,7 @@ async def cmd_start(
     title = ROLE_TITLES.get(user.role, "пользователь")
 
     # Менеджер без телефона — просим поделиться контактом.
-    if user.role == UserRole.MANAGER and not user.phone:
+    if user.role == UserRole.ADMIN and not user.phone:
         await message.answer(
             f"👋 Здравствуйте, {name}!\n\n"
             "Чтобы завершить регистрацию, поделитесь, пожалуйста, "
@@ -174,11 +175,10 @@ async def cmd_me(message: Message, user: User | None, session: AsyncSession) -> 
     if user.group_id:
         group = await group_repo.get_by_id(session, user.group_id)
         if group:
-            group_label = f"город: {html.escape(group.city)}, группа: {group.id}" if group.city else f"группа: {group.id}"
-            lines.append(f"Группа: {group_label}")
+            lines.append(format_group_lines(group))
         else:
             lines.append("Группа: —")
-    if user.role == UserRole.MANAGER:
+    if user.role == UserRole.ADMIN:
         lines.append(f"Телефон: {'сохранён ✓' if user.phone else 'не указан ✗'}")
 
     await message.answer("\n".join(lines))

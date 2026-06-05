@@ -40,15 +40,15 @@ class AuthMiddleware(BaseMiddleware):
             user = await user_repo.get_by_tg_id(session, tg_user.id)
 
             if user is None and tg_user.id in self._settings.admin_tg_ids:
-                # Первый вход администратора из .env — создаём запись.
+                # Первый вход директора из .env — создаём запись.
                 user = await user_repo.create(
                     session,
                     tg_id=tg_user.id,
-                    role=UserRole.ADMIN,
+                    role=UserRole.DIRECTOR,
                     full_name=tg_user.full_name or "",
                     tg_username=tg_user.username,
                 )
-                logger.info("Авто-регистрация администратора tg_id=%s", tg_user.id)
+                logger.info("Авто-регистрация директора tg_id=%s", tg_user.id)
             elif user is not None:
                 await user_repo.update_tg_profile(
                     session,

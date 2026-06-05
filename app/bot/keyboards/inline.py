@@ -11,7 +11,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.db.models import Group, Order, OrderStatus
+from app.db.models import Group, Order, OrderStatus, User
 
 
 def groups_keyboard(groups: list[Group], prefix: str) -> InlineKeyboardMarkup:
@@ -27,41 +27,47 @@ def groups_keyboard(groups: list[Group], prefix: str) -> InlineKeyboardMarkup:
 
 
 def groups_select_keyboard(
-    groups: list[Group], manager_names: dict[int, str | None]
+    groups: list[Group], admin_counts: dict[int, int]
 ) -> InlineKeyboardMarkup:
-    """Выбор группы оператором при создании заявки.
+    """Выбор группы менеджером при создании заявки.
 
-    Рядом с названием — имя текущего менеджера или «свободна».
+    Рядом с названием — число активных выездных администраторов группы.
     callback_data: ``select_group:{group_id}``.
     """
     builder = InlineKeyboardBuilder()
     for group in groups:
-        who = manager_names.get(group.id)
-        label = f"{group.name} ({who})" if who else f"{group.name} (свободна)"
+        count = admin_counts.get(group.id, 0)
+        label = f"{group.name} ({count} адм.)" if count else f"{group.name} (нет админов)"
         builder.button(text=label, callback_data=f"select_group:{group.id}")
     builder.adjust(2)
     return builder.as_markup()
 
 
-def registration_keyboard(tg_id: int) -> InlineKeyboardMarkup:
-    """Кнопки назначения роли в уведомлении админу о новом обращении.
+def admins_select_keyboard(admins: list[User]) -> InlineKeyboardMarkup:
+    """Выбор конкретного выездного администратора группы при создании заявки.
 
-    callback_data: ``reg_op:{tg_id}`` / ``reg_mgr:{tg_id}`` / ``reg_ignore:{tg_id}``.
+    callback_data: ``select_admin:{tg_id}``.
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text="👔 Оператор", callback_data=f"reg_op:{tg_id}")
-    builder.button(text="🚗 Менеджер", callback_data=f"reg_mgr:{tg_id}")
-    builder.button(text="🚫 Пропустить", callback_data=f"reg_ignore:{tg_id}")
-    builder.adjust(2, 1)
+    for admin in admins:
+        name = admin.full_name or (
+            f"@{admin.tg_username}" if admin.tg_username else str(admin.tg_id)
+        )
+        builder.button(text=name, callback_data=f"select_admin:{admin.tg_id}")
+    builder.adjust(1)
     return builder.as_markup()
 
 
-def confirm_replace_keyboard(user_id: int, group_id: int) -> InlineKeyboardMarkup:
-    """Подтверждение замены менеджера в занятой группе."""
+def registration_keyboard(tg_id: int) -> InlineKeyboardMarkup:
+    """Кнопки назначения роли в уведомлении директору о новом обращении.
+
+    callback_data: ``reg_mgr:{tg_id}`` / ``reg_adm:{tg_id}`` / ``reg_ignore:{tg_id}``.
+    """
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да, заменить", callback_data=f"confirm_replace:{user_id}:{group_id}")
-    builder.button(text="❌ Отмена", callback_data="cancel")
-    builder.adjust(2)
+    builder.button(text="👔 Менеджер", callback_data=f"reg_mgr:{tg_id}")
+    builder.button(text="🚗 Администратор", callback_data=f"reg_adm:{tg_id}")
+    builder.button(text="🚫 Пропустить", callback_data=f"reg_ignore:{tg_id}")
+    builder.adjust(2, 1)
     return builder.as_markup()
 
 

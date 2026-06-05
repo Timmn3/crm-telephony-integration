@@ -5,20 +5,24 @@ from __future__ import annotations
 
 import html
 import logging
+from datetime import timedelta, timezone
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.filters.role import IsOperator
+from app.bot.filters.role import IsManager
 from app.bot.keyboards.inline import (
+    admins_select_keyboard,
     cancel_keyboard,
     groups_select_keyboard,
     skip_comment_keyboard,
 )
 from app.bot.states import CreateOrder
+from app.config import get_settings
 from app.db.models import Order, OrderStatus, User, UserRole
 from app.db.repositories import group_repo, order_repo, user_repo
 from app.services import order_service
@@ -42,7 +46,7 @@ STATUS_RU = {
 # /order — создание заявки
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("order"), IsOperator)
+@router.message(Command("order"), IsManager)
 async def order_start(message: Message, state: FSMContext) -> None:
     await state.set_state(CreateOrder.waiting_lead_id)
     await message.answer(
@@ -93,13 +97,11 @@ async def order_lead_id(message: Message, state: FSMContext, session: AsyncSessi
         await message.answer("Нет активных групп. Обратитесь к администратору.")
         return
 
-    # Имена текущих менеджеров для подписи кнопок.
-    manager_names: dict[int, str | None] = {}
+    # Число активных выездных админов на группу — для подписи кнопок.
+    admin_counts: dict[int, int] = {}
     for g in groups:
-        m = await user_repo.get_active_manager_by_group(session, g.id)
-        manager_names[g.id] = (
-            m.full_name or (f"@{m.tg_username}" if m.tg_username else str(m.tg_id))
-        ) if m else None
+        admins = await user_repo.list_active_admins_by_group(session, g.id)
+        admin_counts[g.id] = len(admins)
 
     preview_lines = [
         f"<b>Сделка #{data.amo_lead_id}</b>",
@@ -112,11 +114,11 @@ async def order_lead_id(message: Message, state: FSMContext, session: AsyncSessi
     await state.set_state(CreateOrder.waiting_group)
     await message.answer(
         "\n".join(preview_lines),
-        reply_markup=groups_select_keyboard(groups, manager_names),
+        reply_markup=groups_select_keyboard(groups, admin_counts),
     )
 
 
-@router.callback_query(CreateOrder.waiting_group, F.data.startswith("select_group:"), IsOperator)
+@router.callback_query(CreateOrder.waiting_group, F.data.startswith("select_group:"), IsManager)
 async def order_group(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     group_id = int(callback.data.split(":")[1])
     group = await group_repo.get_by_id(session, group_id)
@@ -124,22 +126,56 @@ async def order_group(callback: CallbackQuery, state: FSMContext, session: Async
         await callback.answer("Группа не найдена", show_alert=True)
         return
 
-    manager = await user_repo.get_active_manager_by_group(session, group_id)
-    if manager is None:
+    admins = await user_repo.list_active_admins_by_group(session, group_id)
+    if not admins:
         await callback.answer(
-            "В этой группе нет менеджера. Выберите другую или попросите админа назначить.",
+            "В этой группе нет администраторов. Выберите другую или попросите "
+            "директора назначить.",
             show_alert=True,
         )
         return
 
-    await state.update_data(group_id=group_id, manager_tg_id=manager.tg_id)
+    await state.update_data(group_id=group_id)
+
+    if len(admins) > 1:
+        # Несколько админов — менеджер выбирает конкретного.
+        await state.set_state(CreateOrder.waiting_admin)
+        await callback.message.edit_text(
+            f"Группа: <b>{html.escape(group.name)}</b>.\nВыберите администратора:",
+            reply_markup=admins_select_keyboard(admins),
+        )
+        await callback.answer()
+        return
+
+    # Один админ — шаг выбора пропускаем.
+    await _ask_comment(callback.message, state, group, admins[0].tg_id)
+    await callback.answer()
+
+
+@router.callback_query(CreateOrder.waiting_admin, F.data.startswith("select_admin:"), IsManager)
+async def order_admin(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    admin_tg_id = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    group = await group_repo.get_by_id(session, data.get("group_id"))
+    if group is None:
+        await state.clear()
+        await callback.answer("Группа не найдена. Начните заново: /order", show_alert=True)
+        return
+    await _ask_comment(callback.message, state, group, admin_tg_id)
+    await callback.answer()
+
+
+async def _ask_comment(
+    message: Message, state: FSMContext, group, manager_tg_id: int
+) -> None:
+    """Сохраняет получателя заявки и переводит диалог к вводу комментария."""
+    await state.update_data(manager_tg_id=manager_tg_id)
     await state.set_state(CreateOrder.waiting_comment)
-    await callback.message.edit_text(
+    await message.edit_text(
         f"Группа: <b>{html.escape(group.name)}</b>.\n"
         "Добавить комментарий к заявке? Введите текст или нажмите «Без комментария».",
         reply_markup=skip_comment_keyboard(),
     )
-    await callback.answer()
 
 
 @router.message(CreateOrder.waiting_comment)
@@ -150,7 +186,7 @@ async def order_comment_text(
     await _finalize_order(callback_or_message, state, session, bot, comment_override=comment)
 
 
-@router.callback_query(CreateOrder.waiting_comment, F.data == "skip_comment", IsOperator)
+@router.callback_query(CreateOrder.waiting_comment, F.data == "skip_comment", IsManager)
 async def order_comment_skip(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
@@ -209,7 +245,7 @@ async def _finalize_order(
 # /my_orders
 # --------------------------------------------------------------------------- #
 
-@router.message(Command("my_orders"), IsOperator)
+@router.message(Command("my_orders"), IsManager)
 async def my_orders(message: Message, session: AsyncSession) -> None:
     orders = await order_repo.list_active_by_operator(session, message.from_user.id)
     if not orders:
@@ -230,9 +266,54 @@ def _can_manage_call(user: User | None, order: Order) -> bool:
     """Может ли пользователь одобрять/отклонять звонок по этой заявке."""
     if user is None or not user.is_active:
         return False
-    if user.role == UserRole.ADMIN:
+    if user.role == UserRole.DIRECTOR:
         return True
-    return user.role == UserRole.OPERATOR and order.operator_tg_id == user.tg_id
+    return user.role == UserRole.MANAGER and order.operator_tg_id == user.tg_id
+
+
+async def _notify_admins_call_approved(
+    bot: Bot, session: AsyncSession, order: Order, approver: User | None
+) -> None:
+    settings = get_settings()
+    if not settings.admin_tg_ids:
+        return
+
+    group = await group_repo.get_by_id(session, order.group_id)
+    manager = await user_repo.get_by_tg_id(session, order.manager_tg_id)
+
+    group_name = group.name if group else f"#{order.group_id}"
+    manager_name = manager.full_name if manager else f"tg:{order.manager_tg_id}"
+    approver_name = approver.full_name if approver else "неизвестно"
+    approver_role = "директор" if approver and approver.role == UserRole.DIRECTOR else "менеджер"
+
+    dt = order.call_approved_at
+    if dt:
+        msk = dt.replace(tzinfo=timezone.utc) + timedelta(hours=3)
+        time_str = msk.strftime("%d.%m.%Y %H:%M")
+    else:
+        time_str = "—"
+
+    lead_line = f"Заявка <b>#{order.amo_lead_id}</b>"
+    if order.client_address:
+        lead_line += f" · {html.escape(order.client_address)}"
+
+    text = "\n".join([
+        "📞 <b>Звонок одобрен</b>",
+        "",
+        lead_line,
+        f"Клиент: {html.escape(order.client_name or '—')}",
+        f"Группа: {html.escape(group_name)}",
+        f"Менеджер: {html.escape(manager_name)}",
+        f"Одобрил: {html.escape(approver_name)} ({approver_role})",
+        "",
+        f"🕐 {time_str}",
+    ])
+
+    for admin_id in settings.admin_tg_ids:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            logger.warning("Не удалось уведомить админа %s: %s", admin_id, exc)
 
 
 @router.callback_query(F.data.startswith("approve_call:"))
@@ -255,6 +336,7 @@ async def approve_call(
         session, order, OrderStatus.CALL_APPROVED, set_call_approved_at=True
     )
     await order_service.refresh_card(bot, order)
+    await _notify_admins_call_approved(bot, session, order, user)
     try:
         await callback.message.edit_text(f"✅ Звонок по заявке #{order.amo_lead_id} одобрен.")
     except Exception:  # noqa: BLE001

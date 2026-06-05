@@ -24,22 +24,26 @@ async def test_user_crud(session):
     assert m.phone == "79990000000"
 
 
-async def test_one_manager_per_group_and_replace(session):
+async def test_multiple_admins_per_group(session):
     group = await group_repo.create(session, "Группа-Б", "Город-Б")
-    first = await user_repo.create(
-        session, tg_id=601, role=UserRole.MANAGER, full_name="Первый", group_id=group.id
-    )
-    assert (await user_repo.get_active_manager_by_group(session, group.id)).tg_id == 601
-
-    # Замена: отвязываем первого (group_id=NULL), назначаем второго.
-    unassigned = await user_repo.unassign_from_group(session, group.id)
-    assert unassigned.tg_id == first.tg_id
-    assert first.group_id is None
-
     await user_repo.create(
-        session, tg_id=602, role=UserRole.MANAGER, full_name="Второй", group_id=group.id
+        session, tg_id=601, role=UserRole.ADMIN, full_name="Анна", group_id=group.id
     )
-    assert (await user_repo.get_active_manager_by_group(session, group.id)).tg_id == 602
+    await user_repo.create(
+        session, tg_id=602, role=UserRole.ADMIN, full_name="Борис", group_id=group.id
+    )
+    # Неактивный админ той же группы в выборку не попадает.
+    await user_repo.create(
+        session, tg_id=603, role=UserRole.ADMIN, full_name="Виктор",
+        group_id=group.id, is_active=False,
+    )
+    # Менеджер (создатель заявок) к группе не относится.
+    await user_repo.create(
+        session, tg_id=604, role=UserRole.MANAGER, full_name="Гена", group_id=group.id
+    )
+
+    admins = await user_repo.list_active_admins_by_group(session, group.id)
+    assert [a.tg_id for a in admins] == [601, 602]  # по алфавиту full_name
 
 
 async def test_order_create_sent(session):

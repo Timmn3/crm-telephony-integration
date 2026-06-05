@@ -33,9 +33,9 @@ class Base(DeclarativeBase):
 class UserRole(str, PyEnum):
     """Роли пользователей."""
 
-    ADMIN = "admin"
-    OPERATOR = "operator"
+    DIRECTOR = "director"
     MANAGER = "manager"
+    ADMIN = "admin"
 
 
 class OrderStatus(str, PyEnum):
@@ -67,11 +67,11 @@ _ORDER_STATUS_ENUM = SAEnum(
 
 
 class Group(Base):
-    """Рабочая группа (слот менеджера).
+    """Рабочая группа выездных администраторов.
 
-    В компании 11 групп, в каждой в любой момент работает не более одного
-    активного менеджера (см. User.group_id). Менеджеры в группе меняются —
-    админ переназначает, при этом предыдущий отвязывается (group_id=NULL).
+    К группе привязываются выездные администраторы (UserRole.ADMIN, см.
+    User.group_id) — их в одной группе может быть несколько. Заявку менеджер
+    адресует конкретному админу группы при создании.
     """
 
     __tablename__ = "groups"
@@ -89,7 +89,7 @@ class Group(Base):
 
 
 class User(Base):
-    """Пользователь бота (админ, оператор или менеджер)."""
+    """Пользователь бота (директор, менеджер или администратор)."""
 
     __tablename__ = "users"
 

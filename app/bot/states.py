@@ -4,15 +4,13 @@ from __future__ import annotations
 from aiogram.fsm.state import State, StatesGroup
 
 
-class AddOperator(StatesGroup):
-    waiting_tg_id = State()
-    waiting_group = State()
-
-
 class AddManager(StatesGroup):
-    waiting_target = State()   # ввод @username или пересылка сообщения менеджера
-    waiting_group = State()    # выбор группы
-    waiting_replace = State()  # подтверждение замены текущего менеджера
+    waiting_tg_id = State()    # менеджер не привязан к группе — роль выдаётся сразу
+
+
+class AddAdmin(StatesGroup):
+    waiting_target = State()   # ввод @username или пересылка сообщения администратора
+    waiting_group = State()    # выбор группы (в группе может быть несколько админов)
 
 
 class AddGroup(StatesGroup):
@@ -33,6 +31,7 @@ class RemoveUser(StatesGroup):
 class CreateOrder(StatesGroup):
     waiting_lead_id = State()
     waiting_group = State()
+    waiting_admin = State()    # выбор конкретного админа, если в группе их несколько
     waiting_comment = State()
 
 
