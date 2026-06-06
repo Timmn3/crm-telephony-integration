@@ -251,6 +251,15 @@ class AmoCRMClient:
                     "У контакта сделки не найден корректный номер телефона."
                 )
 
+            # Защита: если имя контакта == его телефон (частая практика в CRM),
+            # не раскрываем номер в карточке администратора.
+            if normalize_phone(client_name) == phone:
+                logger.debug(
+                    "Сделка #%s: имя контакта совпадает с телефоном — заменяем на 'Клиент'",
+                    lead_id,
+                )
+                client_name = "Клиент"
+
             return OrderData(
                 amo_lead_id=lead_id,
                 client_name=client_name,
