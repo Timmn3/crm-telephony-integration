@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     mango_api_url: str = Field("https://app.mango-office.ru/vpbx", alias="MANGO_API_URL")
     mango_line_number: str = Field("", alias="MANGO_LINE_NUMBER")
     mango_extension: str = Field("", alias="MANGO_EXTENSION")
+    # Список коротких extension-номеров ВАТС, которые назначаются выездным
+    # администраторам автоматически (через запятую: "15,25,16,501").
+    mango_available_extensions_raw: str = Field("", alias="MANGO_AVAILABLE_EXTENSIONS")
 
     # ------------------------------------------------------------------ Сервер
     server_host: str = Field("0.0.0.0", alias="SERVER_HOST")
@@ -75,6 +78,14 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+    @property
+    def mango_available_extensions(self) -> list[str]:
+        """Список доступных extension-номеров Mango ВАТС (из MANGO_AVAILABLE_EXTENSIONS)."""
+        raw = self.mango_available_extensions_raw
+        if not raw:
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
 
     @property
     def admin_tg_ids(self) -> list[int]:

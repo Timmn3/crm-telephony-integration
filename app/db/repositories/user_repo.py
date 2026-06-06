@@ -101,6 +101,24 @@ async def set_active(session: AsyncSession, user: User, active: bool) -> None:
     logger.info("Пользователь tg_id=%s is_active=%s", user.tg_id, active)
 
 
+async def set_extension(session: AsyncSession, user: User, extension: str | None) -> None:
+    user.mango_extension = extension
+    await session.flush()
+    logger.info("Пользователь tg_id=%s -> mango_extension=%s", user.tg_id, extension)
+
+
+async def get_used_extensions(session: AsyncSession) -> list[str]:
+    """Возвращает список mango_extension, уже занятых активными администраторами."""
+    result = await session.execute(
+        select(User.mango_extension).where(
+            User.role == UserRole.ADMIN,
+            User.is_active.is_(True),
+            User.mango_extension.is_not(None),
+        )
+    )
+    return [row for (row,) in result.all()]
+
+
 async def list_by_role(
     session: AsyncSession, role: UserRole, *, active_only: bool = False
 ) -> list[User]:

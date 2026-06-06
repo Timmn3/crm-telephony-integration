@@ -65,15 +65,18 @@ class MangoClient:
         self.settings = get_settings()
 
     async def initiate_callback(
-        self, manager_phone: str, client_phone: str, order_id: int
+        self, manager_phone: str, client_phone: str, order_id: int,
+        extension: str | None = None,
     ) -> tuple[str, dict]:
         """Инициирует звонок callback. Возвращает (command_id, ответ Mango).
 
-        Бросает MangoError при сетевой ошибке или ошибочном ответе API.
+        extension — внутренний номер сотрудника в Mango ВАТС. Если не передан,
+        используется MANGO_EXTENSION из конфига (fallback).
         ВАЖНО: номера клиента/менеджера не логируются.
         """
+        resolved_ext = extension or self.settings.mango_extension
         if not (self.settings.mango_api_key and self.settings.mango_api_salt
-                and self.settings.mango_extension):
+                and resolved_ext):
             raise MangoError("Не настроены параметры Mango (key/salt/extension).")
 
         command_id, form = build_callback_payload(
@@ -81,7 +84,7 @@ class MangoClient:
             api_salt=self.settings.mango_api_salt,
             manager_phone=manager_phone,
             client_phone=client_phone,
-            extension=self.settings.mango_extension,
+            extension=resolved_ext,
             line_number=self.settings.mango_line_number,
             order_id=order_id,
         )

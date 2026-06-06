@@ -151,6 +151,16 @@ async def make_call(
         )
         return
 
+    from app.config import get_settings
+    extension = user.mango_extension or get_settings().mango_extension
+    if not extension:
+        await callback.answer(
+            "У вас не назначен внутренний номер Mango (extension). "
+            "Обратитесь к директору.",
+            show_alert=True,
+        )
+        return
+
     # Инициируем звонок. order.client_phone передаётся только в Mango и не логируется.
     mango = MangoClient()
     try:
@@ -158,6 +168,7 @@ async def make_call(
             manager_phone=user.phone,
             client_phone=order.client_phone,
             order_id=order.id,
+            extension=extension,
         )
     except MangoError as exc:
         await call_log_repo.create(

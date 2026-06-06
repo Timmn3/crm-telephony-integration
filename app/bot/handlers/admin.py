@@ -32,6 +32,7 @@ from app.bot.keyboards.inline import (
 )
 from app.bot.keyboards.reply import phone_request_keyboard
 from app.bot.states import AddAdmin, AddGroup, AddManager, DeleteGroup, EditGroup, RemoveUser, SetAmoCode
+from app.config import get_settings
 from app.db.models import User, UserRole
 from app.db.repositories import group_repo, order_repo, pending_repo, user_repo
 from app.services.amocrm import AmoCRMClient, AmoCRMError
@@ -521,9 +522,27 @@ async def _assign_admin(
         )
     await pending_repo.delete(session, tg_id)
 
+    # Автоматически назначить первый свободный extension Mango, если ещё не назначен.
+    extension_warning = ""
+    if not user.mango_extension:
+        available = get_settings().mango_available_extensions
+        if available:
+            used = await user_repo.get_used_extensions(session)
+            free = [e for e in available if e not in used]
+            if free:
+                await user_repo.set_extension(session, user, free[0])
+            else:
+                extension_warning = (
+                    "\n⚠️ Все extension-номера Mango заняты. "
+                    "Добавьте нового сотрудника в Mango ВАТС и назначьте extension вручную."
+                )
+
     has_phone = bool(user.phone)
     group_info = format_group_lines(group) if group else f"Группа: #{group_id}"
-    await message.edit_text(f"✅ Администратор добавлен (tg_id={tg_id}).\n{group_info}")
+    ext_info = f"\nMango extension: {user.mango_extension}" if user.mango_extension else ""
+    await message.edit_text(
+        f"✅ Администратор добавлен (tg_id={tg_id}).\n{group_info}{ext_info}{extension_warning}"
+    )
 
     await set_commands_for_user(bot, tg_id, UserRole.ADMIN)
     text = f"✅ Вас назначили администратором.\n{group_info}\n\n"
@@ -636,7 +655,8 @@ async def list_users(message: Message, session: AsyncSession) -> None:
         if u.group_id:
             g = await group_repo.get_by_id(session, u.group_id)
             group = f", группа {html.escape(g.name)}" if g else f", группа #{u.group_id}"
-        lines.append(f"{mark} {name}{uname} — {role}{group} (tg_id={u.tg_id})")
+        ext = f", ext {u.mango_extension}" if u.mango_extension else ""
+        lines.append(f"{mark} {name}{uname} — {role}{group}{ext} (tg_id={u.tg_id})")
     await message.answer("\n".join(lines))
 
 
