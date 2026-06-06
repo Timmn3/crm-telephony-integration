@@ -33,7 +33,7 @@ async def create(
     comment: str | None = None,
     status: OrderStatus = OrderStatus.SENT,
 ) -> Order:
-    """Создаёт заявку. Менеджер берётся из группы в момент отправки."""
+    """Создаёт заявку. Получатель-администратор задаётся менеджером при создании."""
     order = Order(
         amo_lead_id=amo_lead_id,
         client_name=client_name,

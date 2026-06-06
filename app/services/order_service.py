@@ -1,4 +1,4 @@
-"""Бизнес-логика заявок: рендер карточки, отправка менеджеру, обновление.
+"""Бизнес-логика заявок: рендер карточки, отправка администратору, обновление.
 
 КРИТИЧНО (безопасность): функция render_card НИКОГДА не включает client_phone.
 Телефон клиента не попадает ни в текст карточки, ни в кнопки, ни в логи.
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 
 def status_note(order: Order) -> str | None:
-    """Текстовая пометка статуса на карточке менеджера."""
+    """Текстовая пометка статуса на карточке администратора."""
     return {
         OrderStatus.CALL_REQUESTED: "⏳ Звонок запрошен, ожидайте одобрения менеджера.",
         OrderStatus.CALL_APPROVED: "✅ Звонок одобрен.",
@@ -60,20 +60,20 @@ def render_card(order: Order, *, note: str | None = None) -> str:
 # --------------------------------------------------------------------------- #
 
 async def send_to_manager(bot: Bot, session: AsyncSession, order: Order) -> bool:
-    """Отправляет карточку заявки назначенному менеджеру в ЛС. True при успехе."""
+    """Отправляет карточку заявки назначенному администратору в ЛС. True при успехе."""
     if order.manager_tg_id is None:
-        logger.warning("Заявка #%s без менеджера — отправка невозможна", order.id)
+        logger.warning("Заявка #%s без администратора — отправка невозможна", order.id)
         return False
     text = render_card(order, note=status_note(order))
     kb = manager_card_keyboard(order)
     try:
         msg = await bot.send_message(order.manager_tg_id, text, reply_markup=kb)
     except (TelegramForbiddenError, TelegramBadRequest) as exc:
-        logger.warning("Не удалось отправить заявку #%s менеджеру tg_id=%s: %s",
+        logger.warning("Не удалось отправить заявку #%s администратору tg_id=%s: %s",
                        order.id, order.manager_tg_id, exc)
         return False
     await order_repo.set_message(session, order, msg.chat.id, msg.message_id)
-    logger.info("Заявка #%s отправлена менеджеру tg_id=%s", order.id, order.manager_tg_id)
+    logger.info("Заявка #%s отправлена администратору tg_id=%s", order.id, order.manager_tg_id)
     return True
 
 

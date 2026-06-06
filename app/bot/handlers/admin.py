@@ -673,7 +673,7 @@ async def _deactivate_user(message: Message, identifier: str, session: AsyncSess
         await message.answer("Нельзя деактивировать директора через эту команду.")
         return
     await user_repo.set_active(session, user, False)
-    # Деактивированный менеджер освобождает группу.
+    # Деактивированный пользователь открепляется от группы.
     if user.group_id is not None:
         await user_repo.set_group(session, user, None)
     await message.answer(

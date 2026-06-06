@@ -1,4 +1,4 @@
-"""Обработчики действий менеджера: регистрация (контакт), запрос звонка,
+"""Обработчики действий выездного администратора: регистрация (контакт), запрос звонка,
 инициация звонка, закрытие заявки.
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ async def _notify(bot: Bot, tg_id: int, text: str, **kwargs) -> None:
 
 @router.message(F.contact)
 async def on_contact(message: Message, user: User | None, session: AsyncSession) -> None:
-    """Сохраняет номер менеджера из пересланного контакта."""
+    """Сохраняет номер администратора из пересланного контакта."""
     if user is None or not user.is_active or user.role != UserRole.ADMIN:
         await message.answer("Спасибо, но номер телефона сейчас не требуется.",
                              reply_markup=remove_keyboard())
@@ -180,7 +180,7 @@ async def make_call(
         "📞 Звонок инициирован. Ожидайте — Mango перезвонит вам на ваш номер, "
         "а затем соединит с клиентом.",
     )
-    logger.info("Звонок по заявке #%s инициирован менеджером tg_id=%s", order.id, user.tg_id)
+    logger.info("Звонок по заявке #%s инициирован администратором tg_id=%s", order.id, user.tg_id)
 
 
 # --------------------------------------------------------------------------- #

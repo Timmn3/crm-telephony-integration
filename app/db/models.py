@@ -41,13 +41,13 @@ class UserRole(str, PyEnum):
 class OrderStatus(str, PyEnum):
     """Статусы заявки (жизненный цикл).
 
-    Заявка сразу создаётся в статусе SENT и отправляется единственному менеджеру
+    Заявка сразу создаётся в статусе SENT и отправляется выбранному администратору
     группы — кнопки «Беру» нет, конкуренции нет (статусы NEW/TAKEN убраны в v2).
     """
 
-    SENT = "sent"                        # Отправлена менеджеру группы
-    CALL_REQUESTED = "call_requested"    # Менеджер запросил звонок
-    CALL_APPROVED = "call_approved"      # ОП одобрил звонок
+    SENT = "sent"                        # Отправлена администратору
+    CALL_REQUESTED = "call_requested"    # Администратор запросил звонок
+    CALL_APPROVED = "call_approved"      # Менеджер одобрил звонок
     CALL_IN_PROGRESS = "call_in_progress"  # Звонок инициирован через Mango
     COMPLETED = "completed"              # Заявка закрыта
     CANCELLED = "cancelled"              # Заявка отменена
@@ -116,7 +116,7 @@ class User(Base):
 
 
 class Order(Base):
-    """Заявка из amoCRM, отправленная менеджеру группы."""
+    """Заявка из amoCRM, отправленная выбранному администратору группы."""
 
     __tablename__ = "orders"
 
@@ -131,7 +131,7 @@ class Order(Base):
         ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
     )
     operator_tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    # Менеджер берётся автоматически из группы в момент отправки.
+    # Получатель-администратор: менеджер выбирает его из группы при создании.
     manager_tg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[OrderStatus] = mapped_column(
         _ORDER_STATUS_ENUM, default=OrderStatus.SENT, nullable=False, index=True
