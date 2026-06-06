@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import html
 import logging
+import random
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -152,14 +153,15 @@ async def make_call(
         return
 
     from app.config import get_settings
-    extension = user.mango_extension or get_settings().mango_extension
-    if not extension:
+    settings = get_settings()
+    pool = settings.mango_available_extensions or ([settings.mango_extension] if settings.mango_extension else [])
+    if not pool:
         await callback.answer(
-            "У вас не назначен внутренний номер Mango (extension). "
-            "Обратитесь к директору.",
+            "Не настроены extension-номера Mango. Обратитесь к администратору.",
             show_alert=True,
         )
         return
+    extension = random.choice(pool)
 
     # Инициируем звонок. order.client_phone передаётся только в Mango и не логируется.
     mango = MangoClient()
