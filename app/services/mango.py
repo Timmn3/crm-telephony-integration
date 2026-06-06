@@ -108,7 +108,7 @@ class MangoClient:
         logger.info("Mango ответ (order=%s): %s", order_id, result)
 
         result_code = result.get("result") if isinstance(result, dict) else None
-        if result_code not in (None, 0, "0"):
+        if result_code not in (None, 0, "0", 1000, "1000"):
             logger.error(
                 "Mango вернул код ошибки %s (order=%s)", result_code, order_id
             )
