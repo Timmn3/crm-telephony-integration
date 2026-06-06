@@ -70,6 +70,7 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------ Прочее
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    coder_tg_id: int | None = Field(None, alias="CODER")
 
     @field_validator("amo_address_field_id", "amo_phone_field_id", mode="before")
     @classmethod

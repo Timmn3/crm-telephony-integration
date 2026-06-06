@@ -33,6 +33,12 @@ async def main() -> None:
 
     fastapi_app.state.bot = bot
 
+    if settings.coder_tg_id:
+        try:
+            await bot.send_message(settings.coder_tg_id, "Бот call_masking_bot запущен 🚀")
+        except Exception as exc:
+            logger.warning("Не удалось уведомить кодера о запуске: %s", exc)
+
     uvicorn_config = uvicorn.Config(
         fastapi_app,
         host=settings.server_host,
