@@ -253,7 +253,7 @@ class AmoCRMClient:
 
             # Защита: если имя контакта == его телефон (частая практика в CRM),
             # не раскрываем номер в карточке администратора.
-            if normalize_phone(client_name) == phone:
+            if normalize_phone(client_name) is not None:
                 logger.debug(
                     "Сделка #%s: имя контакта совпадает с телефоном — заменяем на 'Клиент'",
                     lead_id,
