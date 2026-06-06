@@ -111,18 +111,18 @@ async def request_call(
         session, order, OrderStatus.CALL_REQUESTED, set_call_requested_at=True
     )
     await order_service.refresh_card(bot, order)
-    await callback.answer("Запрос на звонок отправлен оператору.")
+    await callback.answer("Запрос на звонок отправлен менеджеру.")
 
     name = user.full_name or (f"@{user.tg_username}" if user.tg_username else str(user.tg_id))
     await _notify(
         bot, order.operator_tg_id,
         f"🔔 <b>Запрос на звонок</b>\n"
-        f"Менеджер {html.escape(name)} просит разрешение позвонить клиенту.\n"
+        f"Администратор {html.escape(name)} просит разрешение позвонить клиенту.\n"
         f"Заявка #{order.amo_lead_id}\n"
         f"Клиент: {html.escape(order.client_name)}",
         reply_markup=operator_call_request_keyboard(order.id),
     )
-    logger.info("Менеджер tg_id=%s запросил звонок по заявке #%s", user.tg_id, order_id)
+    logger.info("Администратор tg_id=%s запросил звонок по заявке #%s", user.tg_id, order_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -184,7 +184,7 @@ async def make_call(
 
 
 # --------------------------------------------------------------------------- #
-# Закрыть заявку (менеджер, оператор или админ)
+# Закрыть заявку (менеджер или администратор)
 # --------------------------------------------------------------------------- #
 
 @router.callback_query(F.data.startswith("complete_order:"))

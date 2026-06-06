@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 def status_note(order: Order) -> str | None:
     """Текстовая пометка статуса на карточке менеджера."""
     return {
-        OrderStatus.CALL_REQUESTED: "⏳ Звонок запрошен, ожидайте одобрения оператора.",
+        OrderStatus.CALL_REQUESTED: "⏳ Звонок запрошен, ожидайте одобрения менеджера.",
         OrderStatus.CALL_APPROVED: "✅ Звонок одобрен.",
         OrderStatus.CALL_IN_PROGRESS: "📞 Звонок инициирован. Ожидайте — Mango перезвонит вам.",
         OrderStatus.COMPLETED: "✔️ Заявка закрыта.",

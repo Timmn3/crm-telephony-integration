@@ -4,7 +4,7 @@
 
 Примечание: при создании заявки select_group / skip_comment не несут order_id —
 заявка создаётся в БД только в конце диалога (после комментария), id заранее нет.
-Данные сделки до этого момента живут в FSM оператора.
+Данные сделки до этого момента живут в FSM менеджера.
 """
 from __future__ import annotations
 
@@ -106,11 +106,11 @@ def cancel_keyboard(callback_data: str = "cancel") -> InlineKeyboardMarkup:
 
 
 # --------------------------------------------------------------------------- #
-# Клавиатуры карточки заявки (для менеджера и оператора)
+# Клавиатуры карточки заявки (для администратора и менеджера)
 # --------------------------------------------------------------------------- #
 
 def manager_card_keyboard(order: Order) -> InlineKeyboardMarkup | None:
-    """Кнопки на карточке заявки у менеджера в зависимости от статуса.
+    """Кнопки на карточке заявки у администратора в зависимости от статуса.
 
     Кнопка «Закрыть заявку» доступна на всех активных статусах.
     """
@@ -137,7 +137,7 @@ def manager_card_keyboard(order: Order) -> InlineKeyboardMarkup | None:
 
 
 def operator_call_request_keyboard(order_id: int) -> InlineKeyboardMarkup:
-    """Кнопки одобрить/отклонить звонок для оператора."""
+    """Кнопки одобрить/отклонить звонок для менеджера."""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Одобрить", callback_data=f"approve_call:{order_id}")
     builder.button(text="❌ Отклонить", callback_data=f"reject_call:{order_id}")

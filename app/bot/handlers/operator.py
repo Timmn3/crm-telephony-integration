@@ -1,4 +1,4 @@
-"""Обработчики оператора: создание заявки (/order), список (/my_orders),
+"""Обработчики менеджера: создание заявки (/order), список (/my_orders),
 одобрение/отклонение звонка.
 """
 from __future__ import annotations
@@ -232,11 +232,11 @@ async def _finalize_order(
 
     if delivered:
         await message.answer(
-            f"✅ Заявка #{order.amo_lead_id} отправлена менеджеру {mname} (группа {gname})."
+            f"✅ Заявка #{order.amo_lead_id} отправлена администратору {mname} (группа {gname})."
         )
     else:
         await message.answer(
-            f"⚠️ Заявка #{order.amo_lead_id} создана, но менеджер {mname} ещё не "
+            f"⚠️ Заявка #{order.amo_lead_id} создана, но администратор {mname} ещё не "
             "начинал диалог с ботом — карточка не доставлена."
         )
 
@@ -303,7 +303,7 @@ async def _notify_admins_call_approved(
         lead_line,
         f"Клиент: {html.escape(order.client_name or '—')}",
         f"Группа: {html.escape(group_name)}",
-        f"Менеджер: {html.escape(manager_name)}",
+        f"Администратор: {html.escape(manager_name)}",
         f"Одобрил: {html.escape(approver_name)} ({approver_role})",
         "",
         f"🕐 {time_str}",
@@ -342,7 +342,7 @@ async def approve_call(
     except Exception:  # noqa: BLE001
         pass
     await callback.answer("Звонок одобрен.")
-    logger.info("Оператор tg_id=%s одобрил звонок по заявке #%s",
+    logger.info("Менеджер tg_id=%s одобрил звонок по заявке #%s",
                 callback.from_user.id, order_id)
 
 
@@ -380,5 +380,5 @@ async def reject_call(
             )
         except Exception:  # noqa: BLE001
             logger.warning("Не удалось уведомить менеджера об отклонении звонка")
-    logger.info("Звонок по заявке #%s отклонён оператором tg_id=%s",
+    logger.info("Звонок по заявке #%s отклонён менеджером tg_id=%s",
                 order_id, callback.from_user.id)
