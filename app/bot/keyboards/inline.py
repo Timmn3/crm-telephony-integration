@@ -127,7 +127,7 @@ def manager_card_keyboard(order: Order) -> InlineKeyboardMarkup | None:
         builder.button(text="📞 Позвонить клиенту", callback_data=f"make_call:{order.id}")
         builder.button(text="✔️ Закрыть заявку", callback_data=f"complete_order:{order.id}")
     elif status == OrderStatus.CALL_IN_PROGRESS:
-        builder.button(text="📞 Запросить звонок ещё раз", callback_data=f"request_call:{order.id}")
+        builder.button(text="📞 Позвонить клиенту", callback_data=f"make_call:{order.id}")
         builder.button(text="✔️ Закрыть заявку", callback_data=f"complete_order:{order.id}")
     else:
         return None

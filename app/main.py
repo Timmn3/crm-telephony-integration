@@ -31,6 +31,8 @@ async def main() -> None:
     async with async_session_factory() as session:
         await setup_all_commands(bot, session)
 
+    fastapi_app.state.bot = bot
+
     uvicorn_config = uvicorn.Config(
         fastapi_app,
         host=settings.server_host,

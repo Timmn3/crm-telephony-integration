@@ -141,7 +141,7 @@ async def make_call(
     if order.manager_tg_id != user.tg_id:
         await callback.answer("Это не ваша заявка.", show_alert=True)
         return
-    if order.status != OrderStatus.CALL_APPROVED:
+    if order.status not in (OrderStatus.CALL_APPROVED, OrderStatus.CALL_IN_PROGRESS):
         await callback.answer("Звонок сейчас недоступен. Запросите одобрение.", show_alert=True)
         return
     if not user.phone:
