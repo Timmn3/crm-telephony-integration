@@ -30,14 +30,20 @@ def build_callback_payload(
     client_phone: str,
     extension: str,
     order_id: int,
-    line_number: str = "",
+    line_number: str,
     command_id: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Формирует (command_id, form-data) для callback-запроса к Mango.
 
     Телефоны — в формате 7XXXXXXXXXX.
     extension — внутренний короткий номер сотрудника в ВАТС Mango (обязателен).
+    line_number — корпоративный номер-маска (АОН), который видит клиент. Обязателен:
+    без него Mango подставляет личный мобильный сотрудника — маскирование ломается.
     """
+    if not line_number:
+        raise MangoError(
+            "MANGO_LINE_NUMBER не задан — звонок без маскирующего номера запрещён."
+        )
     if command_id is None:
         command_id = f"cb_{order_id}_{int(time.time())}"
 
@@ -45,9 +51,8 @@ def build_callback_payload(
         "command_id": command_id,
         "from": {"extension": extension, "number": manager_phone},
         "to_number": client_phone,
+        "line_number": line_number,
     }
-    if line_number:
-        data["line_number"] = line_number
     json_str = json.dumps(data)
     sign = hashlib.sha256((api_key + json_str + api_salt).encode()).hexdigest()
     form = {
@@ -76,8 +81,10 @@ class MangoClient:
         """
         resolved_ext = extension or self.settings.mango_extension
         if not (self.settings.mango_api_key and self.settings.mango_api_salt
-                and resolved_ext):
-            raise MangoError("Не настроены параметры Mango (key/salt/extension).")
+                and resolved_ext and self.settings.mango_line_number):
+            raise MangoError(
+                "Не настроены параметры Mango (key/salt/extension/line_number)."
+            )
 
         command_id, form = build_callback_payload(
             api_key=self.settings.mango_api_key,

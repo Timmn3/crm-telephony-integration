@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
 from pydantic import Field, field_validator
@@ -57,11 +58,11 @@ class Settings(BaseSettings):
     mango_api_key: str = Field("", alias="MANGO_API_KEY")
     mango_api_salt: str = Field("", alias="MANGO_API_SALT")
     mango_api_url: str = Field("https://app.mango-office.ru/vpbx", alias="MANGO_API_URL")
+    # Корпоративный номер-маска (АОН), который видит клиент. ВАЖНО: НЕ 8-800 —
+    # федеральные 8-800 Mango не выпускает как исходящие. Только городской/мобильный
+    # номер, подключённый к ВАТС, формат 7XXXXXXXXXX.
     mango_line_number: str = Field("", alias="MANGO_LINE_NUMBER")
     mango_extension: str = Field("", alias="MANGO_EXTENSION")
-    # Список коротких extension-номеров ВАТС, которые назначаются выездным
-    # администраторам автоматически (через запятую: "15,25,16,501").
-    mango_available_extensions_raw: str = Field("", alias="MANGO_AVAILABLE_EXTENSIONS")
 
     # ------------------------------------------------------------------ Сервер
     server_host: str = Field("0.0.0.0", alias="SERVER_HOST")
@@ -80,13 +81,21 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @property
-    def mango_available_extensions(self) -> list[str]:
-        """Список доступных extension-номеров Mango ВАТС (из MANGO_AVAILABLE_EXTENSIONS)."""
-        raw = self.mango_available_extensions_raw
-        if not raw:
-            return []
-        return [p.strip() for p in raw.split(",") if p.strip()]
+    @field_validator("mango_line_number", mode="after")
+    @classmethod
+    def _validate_line_number(cls, value: str) -> str:
+        """Маскирующий номер — формат 7XXXXXXXXXX (11 цифр, начинается с 7).
+
+        Пустая строка допустима на уровне конфига (обязательность проверяется при
+        инициации звонка), но кривой формат (напр. 8-800 как 88005559802) ловим сразу,
+        чтобы он не ушёл в Mango незаметно.
+        """
+        if value and not re.fullmatch(r"7\d{10}", value):
+            raise ValueError(
+                "MANGO_LINE_NUMBER должен быть в формате 7XXXXXXXXXX "
+                "(11 цифр, начинается с 7); напр. 88005559802 недопустим."
+            )
+        return value
 
     @property
     def admin_tg_ids(self) -> list[int]:
