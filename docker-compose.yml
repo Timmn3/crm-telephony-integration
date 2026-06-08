@@ -11,7 +11,8 @@ services:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: "8080"
     ports:
-      - "${SERVER_PORT:-8080}:8080"
+      # Только localhost: вебхуки не используются, наружу порт не торчит.
+      - "127.0.0.1:${SERVER_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
