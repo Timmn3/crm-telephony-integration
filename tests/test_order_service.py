@@ -21,6 +21,20 @@ def test_render_card_hides_phone():
     assert "заметка" in card
 
 
+def test_render_card_strips_phone_from_comment():
+    """Утечка из бага: если телефон попал в любое поле — он не уходит в текст карточки."""
+    leak = "+79114053330"
+    order = Order(
+        amo_lead_id=32034935, client_name="Клиент", client_phone=CLIENT_PHONE,
+        client_address=None, comment=leak,
+        group_id=1, operator_tg_id=1, status=OrderStatus.CALL_APPROVED,
+    )
+    card = order_service.render_card(order)
+    assert leak not in card
+    assert "9114053330" not in card
+    assert "[номер скрыт]" in card
+
+
 async def test_send_to_manager_stores_message(session, fake_bot):
     group = await group_repo.create(session, "Личка", "Город")
     await user_repo.create(

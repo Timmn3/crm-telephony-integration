@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.inline import manager_card_keyboard
 from app.db.models import Order, OrderStatus
 from app.db.repositories import order_repo
+from app.utils.phone import strip_phones
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +40,23 @@ def status_note(order: Order) -> str | None:
 
 
 def render_card(order: Order, *, note: str | None = None) -> str:
-    """Формирует HTML-текст карточки заявки. Без номера телефона клиента!"""
+    """Формирует HTML-текст карточки заявки. Без номера телефона клиента!
+
+    Каждое поле дополнительно прогоняется через strip_phones (defense-in-depth):
+    даже если телефон просочится в имя/адрес/комментарий — в текст он не попадёт.
+    """
+    name = strip_phones(order.client_name) or "—"
     lines = [
         f"📋 <b>Заявка #{order.amo_lead_id}</b>",
         "",
-        f"<b>Клиент:</b> {html.escape(order.client_name or '—')}",
+        f"<b>Клиент:</b> {html.escape(name)}",
     ]
-    if order.client_address:
-        lines.append(f"<b>Адрес:</b> {html.escape(order.client_address)}")
-    if order.comment:
-        lines.append(f"<b>Комментарий:</b> {html.escape(order.comment)}")
+    address = strip_phones(order.client_address)
+    if address:
+        lines.append(f"<b>Адрес:</b> {html.escape(address)}")
+    comment = strip_phones(order.comment)
+    if comment:
+        lines.append(f"<b>Комментарий:</b> {html.escape(comment)}")
     if note:
         lines.append("")
         lines.append(note)

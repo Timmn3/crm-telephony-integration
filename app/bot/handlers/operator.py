@@ -83,12 +83,13 @@ async def order_lead_id(message: Message, state: FSMContext, session: AsyncSessi
         return
 
     # Телефон храним только в FSM (память процесса) до создания заявки в БД.
+    # Комментарий в карточку берём ТОЛЬКО из ручного ввода менеджера (ниже), а не из
+    # amoCRM: название сделки у заказчика = номер клиента, оно утекало бы в карточку.
     await state.update_data(
         amo_lead_id=data.amo_lead_id,
         client_name=data.client_name,
         client_phone=data.client_phone,
         client_address=data.client_address,
-        comment=data.comment,
     )
 
     groups = await group_repo.list_active(session)
@@ -207,7 +208,8 @@ async def _finalize_order(
         await message.answer("Сессия создания заявки потеряна. Начните заново: /order")
         return
 
-    comment = comment_override if comment_override is not None else data.get("comment")
+    # Только ручной ввод менеджера; amo-комментарий (название сделки) в карточку не тащим.
+    comment = comment_override
 
     order = await order_repo.create(
         session,

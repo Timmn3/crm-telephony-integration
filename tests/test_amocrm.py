@@ -84,7 +84,9 @@ async def test_get_order_data_parses_lead_and_contact(session):
     assert data.client_phone == "79991234567"
     assert data.client_name == "Иванов"
     assert data.client_address == "ул. Ленина, 10"
-    assert data.comment == "Замер окон"
+    # Название сделки (lead.name) в comment больше НЕ тащим — у заказчика сделки
+    # называют по номеру клиента, это утекало бы в карточку. Комментарий — ручной.
+    assert data.comment is None
 
 
 async def test_lead_not_found(session):

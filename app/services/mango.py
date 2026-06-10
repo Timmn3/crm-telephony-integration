@@ -23,6 +23,10 @@ class MangoError(Exception):
     """Ошибка при инициации звонка через Mango."""
 
 
+class MangoConfigError(MangoError):
+    """Mango не настроен (нет key/salt/extension/line_number) — нужна правка .env."""
+
+
 def build_callback_payload(
     api_key: str,
     api_salt: str,
@@ -82,7 +86,7 @@ class MangoClient:
         resolved_ext = extension or self.settings.mango_extension
         if not (self.settings.mango_api_key and self.settings.mango_api_salt
                 and resolved_ext and self.settings.mango_line_number):
-            raise MangoError(
+            raise MangoConfigError(
                 "Не настроены параметры Mango (key/salt/extension/line_number)."
             )
 

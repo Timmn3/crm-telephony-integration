@@ -19,7 +19,7 @@ from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.db.models import OrderStatus, User, UserRole
 from app.db.repositories import call_log_repo, group_repo, order_repo, user_repo
 from app.services import order_service
-from app.services.mango import MangoClient, MangoError
+from app.services.mango import MangoClient, MangoConfigError, MangoError
 from app.utils.phone import normalize_phone
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,13 @@ async def make_call(
             mango_command_id="", status="error",
         )
         logger.error("Ошибка инициации звонка по заявке #%s: %s", order.id, exc)
-        await callback.answer("Не удалось инициировать звонок, попробуйте позже.", show_alert=True)
+        # Конфиг не настроен (напр. пустой MANGO_LINE_NUMBER) — «позже» не поможет,
+        # нужна правка на сервере. Различаем, чтобы не вводить админа в заблуждение.
+        if isinstance(exc, MangoConfigError):
+            msg = "Звонки временно недоступны (не настроен маскирующий номер). Сообщите разработчику."
+        else:
+            msg = "Не удалось инициировать звонок, попробуйте позже."
+        await callback.answer(msg, show_alert=True)
         return
 
     await order_repo.set_status(session, order, OrderStatus.CALL_IN_PROGRESS)

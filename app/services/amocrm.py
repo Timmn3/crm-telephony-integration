@@ -265,7 +265,10 @@ class AmoCRMClient:
                 client_name=client_name,
                 client_phone=phone,
                 client_address=address,
-                comment=lead_name or None,
+                # Название сделки (lead_name) в карточку НЕ тащим: у заказчика сделки
+                # называют по номеру клиента — это утекало бы как «Комментарий».
+                # Комментарий заполняет менеджер вручную при создании заявки.
+                comment=None,
             )
 
     async def list_custom_fields(self) -> dict[str, list[CustomFieldInfo]]:
