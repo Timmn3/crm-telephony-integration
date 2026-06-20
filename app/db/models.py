@@ -100,6 +100,10 @@ class User(Base):
     tg_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Внутренний номер (extension) сотрудника в ВАТС Mango. У каждой выездной
+    # бригады он СВОЙ — без него Mango инициирует callback от чужого сотрудника
+    # и маршрутизирует звонок не туда. Если пусто — fallback на MANGO_EXTENSION.
+    mango_extension: Mapped[str | None] = mapped_column(String(32), nullable=True)
     role: Mapped[UserRole] = mapped_column(_USER_ROLE_ENUM, nullable=False)
     group_id: Mapped[int | None] = mapped_column(
         ForeignKey("groups.id", ondelete="SET NULL"), nullable=True

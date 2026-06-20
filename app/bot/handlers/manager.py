@@ -152,13 +152,16 @@ async def make_call(
         return
 
     # Инициируем звонок. order.client_phone передаётся только в Mango и не логируется.
-    # Маскирующий номер (line_number) и extension берутся из конфига внутри MangoClient.
+    # Маскирующий номер (line_number) берётся из конфига внутри MangoClient.
+    # extension — персональный внутренний номер бригады в ВАТС Mango. Если у юзера
+    # он не задан, MangoClient откатывается на глобальный MANGO_EXTENSION.
     mango = MangoClient()
     try:
         command_id, _result = await mango.initiate_callback(
             manager_phone=user.phone,
             client_phone=order.client_phone,
             order_id=order.id,
+            extension=user.mango_extension,
         )
     except MangoError as exc:
         await call_log_repo.create(
