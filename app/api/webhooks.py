@@ -95,8 +95,13 @@ async def mango_events_call(request: Request) -> dict[str, str]:
         form = await request.form()
         raw = form.get("json", "{}")
         payload = json.loads(raw) if isinstance(raw, str) else {}
-    except Exception:
-        logger.warning("Не удалось разобрать событие Mango events/call")
+    except Exception as exc:
+        # Причину пишем обязательно: отсутствие python-multipart выглядит здесь
+        # ровно как «кривой json», и без текста ошибки это не отличить.
+        logger.warning(
+            "Не удалось разобрать событие Mango events/call: %s: %s",
+            type(exc).__name__, exc,
+        )
         return {"status": "ignored"}
 
     call_id = str(payload.get("call_id") or "")
@@ -146,8 +151,9 @@ async def mango_call_event(request: Request) -> dict[str, str]:
         form = await request.form()
         raw = form.get("json", "{}")
         payload = json.loads(raw) if isinstance(raw, str) else {}
-    except Exception:
-        logger.warning("Не удалось разобрать webhook Mango")
+    except Exception as exc:
+        logger.warning("Не удалось разобрать webhook Mango: %s: %s",
+                       type(exc).__name__, exc)
         return {"status": "ignored"}
 
     command_id = payload.get("command_id")

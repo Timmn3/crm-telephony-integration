@@ -77,6 +77,14 @@ def event(**over) -> dict:
     return payload
 
 
+def test_multipart_dependency_installed():
+    """Страж зависимости: без python-multipart Starlette роняет ЛЮБОЙ request.form()
+    — включая urlencoded. Webhook-и Mango при этом молча перестают работать и
+    выглядят как «пришёл кривой json». Проверено на проде 29.07.2026.
+    """
+    import multipart  # noqa: F401
+
+
 # --------------------------------------------------------------------------- #
 # build_route_payload
 # --------------------------------------------------------------------------- #
