@@ -1,7 +1,7 @@
 """Тесты нормализации и маскирования телефона."""
 import pytest
 
-from app.utils.phone import normalize_phone, strip_phones
+from app.utils.phone import mask_phone, normalize_phone, strip_phones
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -52,3 +52,22 @@ def test_strip_phones_keeps_plain_text(raw):
 
 def test_strip_phones_none():
     assert strip_phones(None) is None
+
+
+# --- mask_phone: частичное скрытие номера для логов ---
+
+@pytest.mark.parametrize("raw,expected", [
+    ("79991234567", "7***4567"),
+    ("+7 (999) 123-45-67", "7***4567"),
+    ("74950000001", "7***0001"),
+])
+def test_mask_phone_keeps_only_tail(raw, expected):
+    out = mask_phone(raw)
+    assert out == expected
+    # середина номера в лог не попадает
+    assert "999123" not in out
+
+
+@pytest.mark.parametrize("raw,expected", [(None, "—"), ("", "—"), ("123", "***")])
+def test_mask_phone_edge_cases(raw, expected):
+    assert mask_phone(raw) == expected

@@ -48,3 +48,19 @@ def strip_phones(text: str | None) -> str | None:
     if not text:
         return text
     return _PHONE_RE.sub(_PHONE_MASK, text)
+
+
+def mask_phone(raw: str | None) -> str:
+    """Частично скрывает номер для записи в лог: 79991234567 -> 7***4567.
+
+    Нужна там, где номер сотрудника всё же приходится логировать (разбор входящих
+    событий Mango): по хвосту из 4 цифр человек узнаёт свой номер и мы можем
+    отлаживать сопоставление АОН, но полный номер в логи не попадает.
+    Телефон КЛИЕНТА не логируется вообще — ни в каком виде.
+    """
+    if not raw:
+        return "—"
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) < 5:
+        return "***"
+    return f"{digits[0]}***{digits[-4:]}"
