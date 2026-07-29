@@ -26,6 +26,7 @@ ENV/
 .vscode/
 *.swp
 
+
 # Logs
 logs/
 *.log
