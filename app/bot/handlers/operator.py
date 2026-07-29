@@ -62,6 +62,24 @@ async def order_lead_id(message: Message, state: FSMContext, session: AsyncSessi
         return
     lead_id = int(text)
 
+    existing = await order_repo.get_active_by_amo_lead_id(session, lead_id)
+    if existing is not None:
+        manager = (
+            await user_repo.get_by_tg_id(session, existing.manager_tg_id)
+            if existing.manager_tg_id else None
+        )
+        mname = html.escape(
+            (manager.full_name or str(manager.tg_id)) if manager else "—"
+        )
+        status_ru = STATUS_RU.get(existing.status, existing.status.value)
+        await state.clear()
+        await message.answer(
+            f"⚠️ По сделке #{lead_id} уже есть активная заявка #{existing.id} "
+            f"(статус: {status_ru}, администратор: {mname}). Дождитесь её закрытия "
+            "или обратитесь к директору, если это ошибка."
+        )
+        return
+
     client = AmoCRMClient(session)
     try:
         data = await client.get_order_data(lead_id)

@@ -133,3 +133,22 @@ async def list_active_by_manager(
         .order_by(Order.created_at.desc())
     )
     return list(result.scalars().all())
+
+
+async def get_active_by_amo_lead_id(
+    session: AsyncSession, amo_lead_id: int
+) -> Order | None:
+    """Активная (не закрытая) заявка по номеру сделки amoCRM, если уже есть.
+
+    Нужна для защиты от дублей: один и тот же лид не должен породить две
+    параллельные заявки, если менеджер повторно вводит номер сделки.
+    """
+    result = await session.execute(
+        select(Order)
+        .where(
+            Order.amo_lead_id == amo_lead_id,
+            Order.status.in_(ACTIVE_STATUSES),
+        )
+        .order_by(Order.created_at.desc())
+    )
+    return result.scalars().first()

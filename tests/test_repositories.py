@@ -65,6 +65,23 @@ async def test_order_create_sent(session):
     assert any(o.id == order.id for o in active)
 
 
+async def test_get_active_by_amo_lead_id(session):
+    group = await group_repo.create(session, "Группа-Г", "Город-Г")
+    order = await order_repo.create(
+        session, amo_lead_id=778, client_name="Клиент2", client_phone="79991112244",
+        group_id=group.id, operator_tg_id=999, manager_tg_id=601,
+    )
+
+    found = await order_repo.get_active_by_amo_lead_id(session, 778)
+    assert found is not None and found.id == order.id
+
+    # Закрытая заявка по этому лиду больше не «активная» — дубль не заблокирует.
+    await order_repo.set_status(session, order, OrderStatus.COMPLETED)
+    assert await order_repo.get_active_by_amo_lead_id(session, 778) is None
+
+    assert await order_repo.get_active_by_amo_lead_id(session, 999999) is None
+
+
 async def test_amo_token_upsert(session):
     exp = datetime.now(timezone.utc) + timedelta(hours=1)
     await amo_token_repo.save(session, access_token="a1", refresh_token="r1", expires_at=exp)
