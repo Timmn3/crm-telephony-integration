@@ -242,7 +242,7 @@ async def _finalize_order(
         status=OrderStatus.SENT,
     )
 
-    delivered = await order_service.send_to_manager(bot, session, order)
+    result = await order_service.send_to_manager(bot, session, order)
     group = await group_repo.get_by_id(session, group_id)
     manager = await user_repo.get_by_tg_id(session, manager_tg_id)
     mname = html.escape(
@@ -250,14 +250,20 @@ async def _finalize_order(
     )
     gname = html.escape(group.name) if group else str(group_id)
 
-    if delivered:
+    if result is order_service.DeliveryResult.DELIVERED:
         await message.answer(
             f"✅ Заявка #{order.amo_lead_id} отправлена администратору {mname} (группа {gname})."
+        )
+    elif result is order_service.DeliveryResult.BLOCKED:
+        await message.answer(
+            f"⚠️ Заявка #{order.amo_lead_id} создана, но администратор {mname} "
+            "заблокировал бота — карточка не доставлена. Попросите его "
+            "разблокировать бота в Telegram (написать /start ещё раз)."
         )
     else:
         await message.answer(
             f"⚠️ Заявка #{order.amo_lead_id} создана, но администратор {mname} ещё не "
-            "начинал диалог с ботом — карточка не доставлена."
+            "начинал диалог с ботом — карточка не доставлена. Попросите его написать боту /start."
         )
 
 

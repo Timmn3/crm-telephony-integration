@@ -82,8 +82,12 @@ class FakeBot:
         self.sent: list[dict] = []
         self.edited: list[dict] = []
         self._mid = 1000
+        # chat_id -> исключение, которое send_message должен выбросить вместо отправки.
+        self.fail_for: dict[int, Exception] = {}
 
     async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+        if chat_id in self.fail_for:
+            raise self.fail_for[chat_id]
         self._mid += 1
         self.sent.append({
             "chat_id": chat_id, "text": text,

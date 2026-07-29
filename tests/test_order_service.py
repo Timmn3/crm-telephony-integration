@@ -1,4 +1,6 @@
 """Тесты бизнес-логики заявок: рендер, отправка, обновление карточки."""
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+
 from app.db.models import Order, OrderStatus
 from app.db.repositories import group_repo, order_repo, user_repo
 from app.db.models import UserRole
@@ -44,14 +46,48 @@ async def test_send_to_manager_stores_message(session, fake_bot):
         session, amo_lead_id=901, client_name="К", client_phone=CLIENT_PHONE,
         group_id=group.id, operator_tg_id=999, manager_tg_id=811,
     )
-    ok = await order_service.send_to_manager(fake_bot, session, order)
-    assert ok is True
+    result = await order_service.send_to_manager(fake_bot, session, order)
+    assert result is order_service.DeliveryResult.DELIVERED
     assert fake_bot.sent[0]["chat_id"] == 811
     # Телефон не утёк в сообщение
     assert CLIENT_PHONE not in fake_bot.sent[0]["text"]
     # Координаты сообщения сохранены на заявке
     assert order.tg_chat_id == 811
     assert order.tg_message_id is not None
+
+
+async def test_send_to_manager_blocked(session, fake_bot):
+    """Админ ранее писал боту, но заблокировал его — TelegramForbiddenError -> BLOCKED."""
+    group = await group_repo.create(session, "Блок", "Город")
+    await user_repo.create(
+        session, tg_id=831, role=UserRole.ADMIN, full_name="Заблокировавший", group_id=group.id
+    )
+    order = await order_repo.create(
+        session, amo_lead_id=903, client_name="К3", client_phone=CLIENT_PHONE,
+        group_id=group.id, operator_tg_id=999, manager_tg_id=831,
+    )
+    fake_bot.fail_for[831] = TelegramForbiddenError(None, "bot was blocked by the user")
+
+    result = await order_service.send_to_manager(fake_bot, session, order)
+    assert result is order_service.DeliveryResult.BLOCKED
+    assert order.tg_chat_id is None
+
+
+async def test_send_to_manager_not_started(session, fake_bot):
+    """Админ никогда не писал /start боту — TelegramBadRequest -> NOT_STARTED."""
+    group = await group_repo.create(session, "НеСтарт", "Город")
+    await user_repo.create(
+        session, tg_id=841, role=UserRole.ADMIN, full_name="Молчун", group_id=group.id
+    )
+    order = await order_repo.create(
+        session, amo_lead_id=904, client_name="К4", client_phone=CLIENT_PHONE,
+        group_id=group.id, operator_tg_id=999, manager_tg_id=841,
+    )
+    fake_bot.fail_for[841] = TelegramBadRequest(None, "chat not found")
+
+    result = await order_service.send_to_manager(fake_bot, session, order)
+    assert result is order_service.DeliveryResult.NOT_STARTED
+    assert order.tg_chat_id is None
 
 
 async def test_refresh_card_edits_message(session, fake_bot):

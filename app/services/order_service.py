@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html
 import logging
+from enum import Enum
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -67,22 +68,43 @@ def render_card(order: Order, *, note: str | None = None) -> str:
 # Отправка и обновление карточки
 # --------------------------------------------------------------------------- #
 
-async def send_to_manager(bot: Bot, session: AsyncSession, order: Order) -> bool:
-    """Отправляет карточку заявки назначенному администратору в ЛС. True при успехе."""
+class DeliveryResult(str, Enum):
+    """Причина результата отправки карточки — нужна, чтобы показать администратору
+    и менеджеру точный текст, а не обобщённое «не доставлено».
+    """
+
+    DELIVERED = "delivered"
+    # aiogram TelegramBadRequest("chat not found") — админ ни разу не писал боту /start.
+    NOT_STARTED = "not_started"
+    # aiogram TelegramForbiddenError("bot was blocked by the user") — писал раньше, но заблокировал бота.
+    BLOCKED = "blocked"
+    NO_MANAGER = "no_manager"
+
+
+async def send_to_manager(bot: Bot, session: AsyncSession, order: Order) -> DeliveryResult:
+    """Отправляет карточку заявки назначенному администратору в ЛС."""
     if order.manager_tg_id is None:
         logger.warning("Заявка #%s без администратора — отправка невозможна", order.id)
-        return False
+        return DeliveryResult.NO_MANAGER
     text = render_card(order, note=status_note(order))
     kb = manager_card_keyboard(order)
     try:
         msg = await bot.send_message(order.manager_tg_id, text, reply_markup=kb)
-    except (TelegramForbiddenError, TelegramBadRequest) as exc:
-        logger.warning("Не удалось отправить заявку #%s администратору tg_id=%s: %s",
-                       order.id, order.manager_tg_id, exc)
-        return False
+    except TelegramForbiddenError as exc:
+        logger.warning(
+            "Администратор tg_id=%s заблокировал бота — заявка #%s не доставлена: %s",
+            order.manager_tg_id, order.id, exc,
+        )
+        return DeliveryResult.BLOCKED
+    except TelegramBadRequest as exc:
+        logger.warning(
+            "Администратор tg_id=%s ещё не начинал диалог с ботом — заявка #%s не доставлена: %s",
+            order.manager_tg_id, order.id, exc,
+        )
+        return DeliveryResult.NOT_STARTED
     await order_repo.set_message(session, order, msg.chat.id, msg.message_id)
     logger.info("Заявка #%s отправлена администратору tg_id=%s", order.id, order.manager_tg_id)
-    return True
+    return DeliveryResult.DELIVERED
 
 
 async def refresh_card(bot: Bot, order: Order) -> None:
