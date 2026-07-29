@@ -101,8 +101,8 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Внутренний номер (extension) сотрудника в ВАТС Mango. У каждой выездной
-    # бригады он СВОЙ — без него Mango инициирует callback от чужого сотрудника
-    # и маршрутизирует звонок не туда. Если пусто — fallback на MANGO_EXTENSION.
+    # бригады он СВОЙ и ОБЯЗАТЕЛЕН для звонка — без него бот откажет в инициации
+    # звонка (раньше был тихий fallback на общий номер — звонок уходил не тому).
     mango_extension: Mapped[str | None] = mapped_column(String(32), nullable=True)
     role: Mapped[UserRole] = mapped_column(_USER_ROLE_ENUM, nullable=False)
     group_id: Mapped[int | None] = mapped_column(

@@ -62,7 +62,6 @@ class Settings(BaseSettings):
     # федеральные 8-800 Mango не выпускает как исходящие. Только городской/мобильный
     # номер, подключённый к ВАТС, формат 7XXXXXXXXXX.
     mango_line_number: str = Field("", alias="MANGO_LINE_NUMBER")
-    mango_extension: str = Field("", alias="MANGO_EXTENSION")
 
     # ------------------------------------------------------------------ Сервер
     server_host: str = Field("0.0.0.0", alias="SERVER_HOST")

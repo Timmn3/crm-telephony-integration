@@ -6,7 +6,12 @@ import pytest
 from aioresponses import aioresponses
 
 from app.config import get_settings
-from app.services.mango import MangoClient, MangoError, build_callback_payload
+from app.services.mango import (
+    MangoClient,
+    MangoError,
+    MangoExtensionMissingError,
+    build_callback_payload,
+)
 
 CALLBACK_URL = "https://app.mango-office.ru/vpbx/commands/callback"
 
@@ -17,7 +22,6 @@ def mango_settings(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "mango_api_key", "KEY")
     monkeypatch.setattr(s, "mango_api_salt", "SALT")
-    monkeypatch.setattr(s, "mango_extension", "15")
     monkeypatch.setattr(s, "mango_line_number", "79917790890")
     return s
 
@@ -51,7 +55,7 @@ async def test_initiate_ok(mango_settings):
     with aioresponses() as m:
         m.post(CALLBACK_URL, status=200, payload={"command_id": "x", "result": 1000})
         command_id, result = await MangoClient().initiate_callback(
-            "79990000001", "79990000002", 42
+            "79990000001", "79990000002", 42, extension="15"
         )
     assert command_id.startswith("cb_42_")
     assert result == {"command_id": "x", "result": 1000}
@@ -61,7 +65,9 @@ async def test_initiate_error(mango_settings):
     with aioresponses() as m:
         m.post(CALLBACK_URL, status=500, body="boom")
         with pytest.raises(MangoError):
-            await MangoClient().initiate_callback("79990000001", "79990000002", 42)
+            await MangoClient().initiate_callback(
+                "79990000001", "79990000002", 42, extension="15"
+            )
 
 
 async def test_initiate_without_line_number_fails(monkeypatch):
@@ -69,10 +75,27 @@ async def test_initiate_without_line_number_fails(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "mango_api_key", "KEY")
     monkeypatch.setattr(s, "mango_api_salt", "SALT")
-    monkeypatch.setattr(s, "mango_extension", "15")
     monkeypatch.setattr(s, "mango_line_number", "")
     with pytest.raises(MangoError):
-        await MangoClient().initiate_callback("79990000001", "79990000002", 42)
+        await MangoClient().initiate_callback(
+            "79990000001", "79990000002", 42, extension="15"
+        )
+
+
+async def test_initiate_without_extension_fails(mango_settings):
+    """Без персонального extension — явная ошибка, а не звонок на чужой добавочный."""
+    with pytest.raises(MangoExtensionMissingError):
+        await MangoClient().initiate_callback(
+            "79990000001", "79990000002", 42, extension=None
+        )
+
+
+async def test_initiate_without_extension_fails_on_empty_string(mango_settings):
+    """Пустая строка (а не None) из БД тоже должна считаться «не задано»."""
+    with pytest.raises(MangoExtensionMissingError):
+        await MangoClient().initiate_callback(
+            "79990000001", "79990000002", 42, extension=""
+        )
 
 
 @pytest.mark.parametrize("bad", ["88005559802", "7999", "89991234567", "7999123456a"])

@@ -19,7 +19,12 @@ from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.db.models import OrderStatus, User, UserRole
 from app.db.repositories import call_log_repo, group_repo, order_repo, user_repo
 from app.services import order_service
-from app.services.mango import MangoClient, MangoConfigError, MangoError
+from app.services.mango import (
+    MangoClient,
+    MangoConfigError,
+    MangoError,
+    MangoExtensionMissingError,
+)
 from app.utils.phone import normalize_phone
 
 logger = logging.getLogger(__name__)
@@ -153,8 +158,7 @@ async def make_call(
 
     # Инициируем звонок. order.client_phone передаётся только в Mango и не логируется.
     # Маскирующий номер (line_number) берётся из конфига внутри MangoClient.
-    # extension — персональный внутренний номер бригады в ВАТС Mango. Если у юзера
-    # он не задан, MangoClient откатывается на глобальный MANGO_EXTENSION.
+    # extension — персональный внутренний номер бригады в ВАТС Mango, обязателен.
     mango = MangoClient()
     try:
         command_id, _result = await mango.initiate_callback(
@@ -169,9 +173,11 @@ async def make_call(
             mango_command_id="", status="error",
         )
         logger.error("Ошибка инициации звонка по заявке #%s: %s", order.id, exc)
-        # Конфиг не настроен (напр. пустой MANGO_LINE_NUMBER) — «позже» не поможет,
-        # нужна правка на сервере. Различаем, чтобы не вводить админа в заблуждение.
-        if isinstance(exc, MangoConfigError):
+        # Конфиг не настроен — «позже» не поможет, нужна правка на сервере/в БД.
+        # Различаем причины, чтобы не вводить админа в заблуждение.
+        if isinstance(exc, MangoExtensionMissingError):
+            msg = "У вас не настроен персональный номер для звонков. Сообщите разработчику."
+        elif isinstance(exc, MangoConfigError):
             msg = "Звонки временно недоступны (не настроен маскирующий номер). Сообщите разработчику."
         else:
             msg = "Не удалось инициировать звонок, попробуйте позже."

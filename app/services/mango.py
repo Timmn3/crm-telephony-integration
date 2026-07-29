@@ -24,7 +24,15 @@ class MangoError(Exception):
 
 
 class MangoConfigError(MangoError):
-    """Mango не настроен (нет key/salt/extension/line_number) — нужна правка .env."""
+    """Mango не настроен (нет key/salt/line_number) — нужна правка .env."""
+
+
+class MangoExtensionMissingError(MangoConfigError):
+    """У сотрудника не задан персональный extension — звонить не на что.
+
+    Раньше тут был тихий fallback на общий MANGO_EXTENSION из .env, из-за чего
+    звонок улетал на чужой добавочный, а не тому админу, который его запросил.
+    """
 
 
 def build_callback_payload(
@@ -75,19 +83,23 @@ class MangoClient:
 
     async def initiate_callback(
         self, manager_phone: str, client_phone: str, order_id: int,
-        extension: str | None = None,
+        extension: str | None,
     ) -> tuple[str, dict]:
         """Инициирует звонок callback. Возвращает (command_id, ответ Mango).
 
-        extension — внутренний номер сотрудника в Mango ВАТС. Если не передан,
-        используется MANGO_EXTENSION из конфига (fallback).
+        extension — персональный внутренний номер сотрудника в Mango ВАТС.
+        Обязателен: без него неясно, кому звонить, а тихий откат на общий номер
+        уже приводил к тому, что звонок улетал не тому сотруднику.
         ВАЖНО: номера клиента/менеджера не логируются.
         """
-        resolved_ext = extension or self.settings.mango_extension
+        if not extension:
+            raise MangoExtensionMissingError(
+                "У сотрудника не задан персональный extension в Mango."
+            )
         if not (self.settings.mango_api_key and self.settings.mango_api_salt
-                and resolved_ext and self.settings.mango_line_number):
+                and self.settings.mango_line_number):
             raise MangoConfigError(
-                "Не настроены параметры Mango (key/salt/extension/line_number)."
+                "Не настроены параметры Mango (key/salt/line_number)."
             )
 
         command_id, form = build_callback_payload(
@@ -95,7 +107,7 @@ class MangoClient:
             api_salt=self.settings.mango_api_salt,
             manager_phone=manager_phone,
             client_phone=client_phone,
-            extension=resolved_ext,
+            extension=extension,
             line_number=self.settings.mango_line_number,
             order_id=order_id,
         )
