@@ -188,6 +188,12 @@ payload'ами, доступ отрубится.
 8. **Автоответ:** `sip_headers` → `Call-Info/answer-after: "0"` в `callback` заставляет
    принять вызов без снятия трубки. Может пригодиться для сценария без интернета.
 
+9. **`python-multipart` обязателен** (наши грабли, 29.07.2026). Mango шлёт webhook-и
+   form-data. Starlette требует этот пакет для `request.form()` при **любом**
+   content-type, включая `urlencoded`. Без него эндпоинт отвечает 200, но payload не
+   разбирается - выглядит как «Mango прислал кривой json». Пакет в `requirements.txt`,
+   есть тест-страж `test_multipart_dependency_installed`.
+
 ---
 
 ## Заготовки на будущее
