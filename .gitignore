@@ -39,6 +39,11 @@ htmlcov/
 # Local plans / temp
 tmp/
 
+# Локальная копия документации Mango (большие файлы, не наш контент).
+# В репо остаются только docs/mango/README.md и extract_text.py.
+docs/mango/*.pdf
+docs/mango/*.txt
+
 # OS
 .DS_Store
 Thumbs.db
