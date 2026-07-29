@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     # федеральные 8-800 Mango не выпускает как исходящие. Только городской/мобильный
     # номер, подключённый к ВАТС, формат 7XXXXXXXXXX.
     mango_line_number: str = Field("", alias="MANGO_LINE_NUMBER")
+    # --- ВРЕМЕННО, только для прототипа «звонок без интернета» ---
+    # Mango шлёт события ПО ВСЕМ входящим звонкам ВАТС, включая звонки пациентов
+    # в колл-центр. Поэтому переводим вызов только при совпадении ВСЕХ трёх условий,
+    # иначе рискуем увести чужой звонок. Любое пустое значение = прототип выключен.
+    #
+    # Служебная линия: на какой номер ВАТС должен прийти звонок.
+    mango_service_line: str = Field("", alias="MANGO_SERVICE_LINE")
+    # Чей АОН принимаем на время теста (номер тестового телефона, не сотрудника).
+    mango_test_caller: str = Field("", alias="MANGO_TEST_CALLER")
+    # Куда переводим. На этапе проверки механики — НАШ тестовый номер,
+    # телефон клиента в прототип не попадает.
+    mango_test_target: str = Field("", alias="MANGO_TEST_TARGET")
 
     # ------------------------------------------------------------------ Сервер
     server_host: str = Field("0.0.0.0", alias="SERVER_HOST")
@@ -80,18 +92,23 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("mango_line_number", mode="after")
+    @field_validator(
+        "mango_line_number", "mango_service_line",
+        "mango_test_caller", "mango_test_target",
+        mode="after",
+    )
     @classmethod
-    def _validate_line_number(cls, value: str) -> str:
-        """Маскирующий номер — формат 7XXXXXXXXXX (11 цифр, начинается с 7).
+    def _validate_line_number(cls, value: str, info: ValidationInfo) -> str:
+        """Номер для Mango — формат 7XXXXXXXXXX (11 цифр, начинается с 7).
 
         Пустая строка допустима на уровне конфига (обязательность проверяется при
         инициации звонка), но кривой формат (напр. 8-800 как 88005559802) ловим сразу,
         чтобы он не ушёл в Mango незаметно.
         """
         if value and not re.fullmatch(r"7\d{10}", value):
+            env_name = (info.field_name or "номер").upper()
             raise ValueError(
-                "MANGO_LINE_NUMBER должен быть в формате 7XXXXXXXXXX "
+                f"{env_name} должен быть в формате 7XXXXXXXXXX "
                 "(11 цифр, начинается с 7); напр. 88005559802 недопустим."
             )
         return value
@@ -118,6 +135,20 @@ class Settings(BaseSettings):
         return (
             f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
+
+    @property
+    def route_prototype_enabled(self) -> bool:
+        """True, если прототип «звонок без интернета» полностью настроен.
+
+        Требуются все три номера сразу — служебная линия, разрешённый звонящий и
+        цель перевода. Пока хоть один не задан, входящие события Mango только
+        логируются: чужой звонок мы никуда не уведём.
+        """
+        return bool(
+            self.mango_service_line
+            and self.mango_test_caller
+            and self.mango_test_target
         )
 
     @property
