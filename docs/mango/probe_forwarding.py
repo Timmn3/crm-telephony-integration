@@ -79,22 +79,36 @@ async def show_rules() -> list[dict]:
     return rules
 
 
+def _to_mango_format(raw: str) -> str:
+    """Приводит номер к виду 8XXXXXXXXXX — именно так их хранит и НАБИРАЕТ ВАТС.
+
+    Проверено живыми звонками 30.07.2026: с номером `7XXXXXXXXXX` правило создаётся
+    (result 1000) и даже перехватывает вызов, но ВАТС не может дозвониться — плечо
+    висит ~23 секунды и отбивается по таймауту, телефон назначения молчит. С `8...`
+    (так пишет сам личный кабинет) звонок доходит. Подпись поля в ЛК при этом
+    обещает «международный формат», что сбивает с толку.
+    """
+    digits = normalize_phone(raw)          # приводит к 7XXXXXXXXXX
+    return "8" + digits[1:] if digits else ""
+
+
 async def add_rule(src_raw: str, dst_raw: str) -> None:
-    src, dst = normalize_phone(src_raw), normalize_phone(dst_raw)
+    src, dst = _to_mango_format(src_raw), _to_mango_format(dst_raw)
     if not src or not dst:
         raise SystemExit(f"Неверный формат номера: {src_raw!r} / {dst_raw!r}")
 
     print(f"[1/3] Ставлю правило: {mask_phone(src)} -> {mask_phone(dst)}")
-    # Значения строками — как в примере офиц. доки (раздел 3.3.2, стр. 63).
+    # Типы числами и forward_wait_sec=0 — как их пишет сам ЛК (сверено через
+    # forwarding/numbers на правиле, созданном руками в кабинете).
     data = await _post("forwarding/number/add", {
         "client_phone_number": src,
-        "client_phone_type": "0",
+        "client_phone_type": 0,
         "status": "1",
         "forward_type": "ext_forward",
         "forward_to_ext": {
-            "forward_number_type": "0",
+            "forward_number_type": 0,
             "forward_number": dst,
-            "forward_wait_sec": "30",
+            "forward_wait_sec": "0",
         },
         "comment": "temp test call-masking",
     })
