@@ -101,6 +101,38 @@ async def set_active(session: AsyncSession, user: User, active: bool) -> None:
     logger.info("Пользователь tg_id=%s is_active=%s", user.tg_id, active)
 
 
+async def set_mango_extension(session: AsyncSession, user: User, extension: str | None) -> None:
+    """Устанавливает (или очищает, если None) внутренний номер Mango пользователя."""
+    user.mango_extension = extension
+    await session.flush()
+    logger.info("Пользователь tg_id=%s -> mango_extension=%s", user.tg_id, extension)
+
+
+async def get_group_mango_extension(
+    session: AsyncSession, group_id: int, *, exclude_user_id: int | None = None
+) -> str | None:
+    """Известный extension группы — берётся у активных ADMIN этой группы.
+
+    exclude_user_id (User.id) исключает конкретного пользователя из поиска —
+    нужно при смене его группы, чтобы не засчитать его собственное (уже
+    устаревшее, от старой группы) значение как консенсус новой группы.
+
+    При разошедшихся значениях у разных админов группы — не резолвим конфликт,
+    логируем warning и возвращаем детерминированно наименьшее (sorted()[0]).
+    """
+    admins = await list_active_admins_by_group(session, group_id)
+    extensions = {
+        a.mango_extension for a in admins
+        if a.mango_extension and (exclude_user_id is None or a.id != exclude_user_id)
+    }
+    if not extensions:
+        return None
+    if len(extensions) > 1:
+        logger.warning(
+            "Группа id=%s: у активных админов разошедшиеся mango_extension: %s",
+            group_id, sorted(extensions),
+        )
+    return sorted(extensions)[0]
 
 
 async def list_by_role(
@@ -132,6 +164,22 @@ async def list_active_admins_by_group(
             User.role == UserRole.ADMIN,
             User.group_id == group_id,
             User.is_active.is_(True),
+        ).order_by(User.full_name)
+    )
+    return list(result.scalars().all())
+
+
+async def list_admins_without_extension(session: AsyncSession) -> list[User]:
+    """Активные ADMIN, привязанные к группе, но без mango_extension.
+
+    Такие пользователи не смогут инициировать звонок (MangoExtensionMissingError).
+    """
+    result = await session.execute(
+        select(User).where(
+            User.role == UserRole.ADMIN,
+            User.group_id.isnot(None),
+            User.is_active.is_(True),
+            (User.mango_extension.is_(None)) | (User.mango_extension == ""),
         ).order_by(User.full_name)
     )
     return list(result.scalars().all())

@@ -12,7 +12,7 @@ from app.bot.commands import setup_all_commands
 from app.config import get_settings
 from app.db.database import async_session_factory, dispose_engine, init_db
 from app.logging_config import setup_logging
-from app.services.bootstrap import ensure_amo_token, seed_groups
+from app.services.bootstrap import ensure_amo_token, report_admins_without_extension, seed_groups
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,8 @@ async def main() -> None:
         await setup_all_commands(bot, session)
 
     fastapi_app.state.bot = bot
+
+    await report_admins_without_extension(bot)
 
     if settings.coder_tg_id:
         try:

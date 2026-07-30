@@ -1,4 +1,5 @@
-"""Инициализация при старте: seed групп и первичная авторизация amoCRM.
+"""Инициализация при старте: seed групп, первичная авторизация amoCRM,
+диагностика администраторов без mango_extension.
 
 Вызывается из main.py после применения миграций.
 """
@@ -9,9 +10,11 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from aiogram import Bot
+
 from app.config import get_settings
 from app.db.database import get_session
-from app.db.repositories import amo_token_repo, group_repo
+from app.db.repositories import amo_token_repo, group_repo, user_repo
 from app.services.amocrm import AmoCRMClient
 
 logger = logging.getLogger(__name__)
@@ -102,3 +105,34 @@ async def ensure_amo_token() -> None:
             "amoCRM настроен, но нет токенов, AMOCRM_AUTH_CODE и AMOCRM_LONG_TOKEN. "
             "Авторизуйтесь командой /set_amo_code <code>."
         )
+
+
+async def report_admins_without_extension(bot: Bot) -> None:
+    """Уведомляет CODER о активных админах без mango_extension при старте.
+
+    Не блокирует запуск бота ни при отсутствии CODER, ни при ошибке отправки.
+    """
+    settings = get_settings()
+    async with get_session() as session:
+        admins = await user_repo.list_admins_without_extension(session)
+        groups = {g.id: g for g in await group_repo.list_all(session)}
+
+    if not admins:
+        logger.info("Диагностика extension: у всех активных админов extension задан")
+        return
+
+    lines = [f"⚠️ Админы без mango_extension ({len(admins)}) — звонки у них не заработают:"]
+    for a in admins:
+        group = groups.get(a.group_id)
+        group_label = group.name if group else f"#{a.group_id}"
+        lines.append(f"— {a.full_name or a.tg_id} ({group_label}, tg_id={a.tg_id})")
+    text = "\n".join(lines)
+    logger.warning("Найдено %d активных админов без extension", len(admins))
+
+    if not settings.coder_tg_id:
+        logger.warning("CODER не задан — уведомление об отсутствующих extension не отправлено")
+        return
+    try:
+        await bot.send_message(settings.coder_tg_id, text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Не удалось уведомить CODER об админах без extension: %s", exc)

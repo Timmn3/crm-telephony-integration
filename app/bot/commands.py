@@ -20,6 +20,7 @@ _COMMANDS: dict[UserRole, list[BotCommand]] = {
         BotCommand(command="add_group", description="Создать группу"),
         BotCommand(command="groups", description="Список групп и администраторов"),
         BotCommand(command="edit_group", description="Редактировать группу"),
+        BotCommand(command="set_extension", description="Задать extension Mango для группы"),
         BotCommand(command="delete_group", description="Удалить группу"),
         BotCommand(command="pending", description="Необработанные обращения"),
         BotCommand(command="users", description="Список пользователей"),

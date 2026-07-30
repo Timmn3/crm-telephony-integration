@@ -1,7 +1,7 @@
 """Обработчики команд директора.
 
 Команды: /add_group, /groups, /edit_group, /delete_group, /add_manager,
-/add_admin, /users, /remove_user, /amo_fields, /set_amo_code.
+/add_admin, /set_extension, /users, /remove_user, /amo_fields, /set_amo_code.
 
 Примечание про Telegram: бот не может узнать tg_id по @username и не может
 написать пользователю первым, пока тот сам не обратится к боту. Способы добавить
@@ -31,7 +31,16 @@ from app.bot.keyboards.inline import (
     registration_keyboard,
 )
 from app.bot.keyboards.reply import phone_request_keyboard
-from app.bot.states import AddAdmin, AddGroup, AddManager, DeleteGroup, EditGroup, RemoveUser, SetAmoCode
+from app.bot.states import (
+    AddAdmin,
+    AddGroup,
+    AddManager,
+    DeleteGroup,
+    EditGroup,
+    RemoveUser,
+    SetAmoCode,
+    SetExtension,
+)
 from app.db.models import User, UserRole
 from app.db.repositories import group_repo, order_repo, pending_repo, user_repo
 from app.services.amocrm import AmoCRMClient, AmoCRMError
@@ -510,6 +519,9 @@ async def _assign_admin(
 
     group = await group_repo.get_by_id(session, group_id)
     user = await user_repo.get_by_tg_id(session, tg_id)
+    existing_group_id = user.group_id if user is not None else None
+    group_changed = existing_group_id != group_id
+
     if user is not None:
         await user_repo.set_role(session, user, UserRole.ADMIN)
         await user_repo.set_group(session, user, group_id)
@@ -521,9 +533,30 @@ async def _assign_admin(
         )
     await pending_repo.delete(session, tg_id)
 
+    # Автоподстановка extension по группе (все админы группы делят один физический
+    # SIM/добавочный). exclude_self только при РЕАЛЬНОЙ смене группы: пользователь
+    # уже попадёт в list_active_admins_by_group(group_id) (set_group выше уже
+    # выполнен), но его текущее значение принадлежит старой группе. Без этого флага
+    # повторный /add_admin на том же человеке в той же группе стирал бы его же
+    # корректный extension.
+    known_extension = await user_repo.get_group_mango_extension(
+        session, group_id,
+        exclude_user_id=user.id if group_changed else None,
+    )
+    await user_repo.set_mango_extension(session, user, known_extension)
+    extension_note = (
+        f"ℹ️ Extension Mango подставлен автоматически по группе: "
+        f"<code>{html.escape(known_extension)}</code>."
+        if known_extension else
+        "⚠️ Extension Mango для этой группы ещё не задан ни у кого — звонки "
+        "не заработают, пока не выполните /set_extension для этой группы."
+    )
+
     has_phone = bool(user.phone)
     group_info = format_group_lines(group) if group else f"Группа: #{group_id}"
-    await message.edit_text(f"✅ Администратор добавлен (tg_id={tg_id}).\n{group_info}")
+    await message.edit_text(
+        f"✅ Администратор добавлен (tg_id={tg_id}).\n{group_info}\n{extension_note}"
+    )
 
     await set_commands_for_user(bot, tg_id, UserRole.ADMIN)
     text = f"✅ Вас назначили администратором.\n{group_info}\n\n"
@@ -539,6 +572,92 @@ async def _assign_admin(
             "⚠️ Не удалось отправить уведомление администратору — он ещё не писал боту. "
             "Попросите его написать /start: после этого бот попросит номер телефона."
         )
+
+
+# --------------------------------------------------------------------------- #
+# Extension Mango для группы
+# --------------------------------------------------------------------------- #
+
+@router.message(Command("set_extension"), IsDirector)
+async def set_extension_start(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    groups = await group_repo.list_active(session)
+    if not groups:
+        await message.answer("Групп пока нет. Создайте: /add_group <название> <город>")
+        return
+    await state.set_state(SetExtension.waiting_group)
+    await message.answer(
+        "Выберите группу, для которой нужно задать/изменить extension Mango "
+        "(будет применён ко всем активным администраторам группы):",
+        reply_markup=groups_keyboard(groups, prefix="admin_set_ext_group"),
+    )
+
+
+@router.callback_query(SetExtension.waiting_group, F.data.startswith("admin_set_ext_group:"))
+async def set_extension_pick_group(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    group_id = int(callback.data.split(":")[1])
+    group = await group_repo.get_by_id(session, group_id)
+    if group is None:
+        await state.clear()
+        await callback.message.edit_text("❌ Группа не найдена.")
+        await callback.answer()
+        return
+    admins = await user_repo.list_active_admins_by_group(session, group_id)
+    if not admins:
+        await state.clear()
+        await callback.message.edit_text(
+            f"❌ В группе «{html.escape(group.name)}» нет активных администраторов.\n"
+            "Сначала добавьте администратора: /add_admin, затем повторите /set_extension."
+        )
+        await callback.answer()
+        return
+    current = await user_repo.get_group_mango_extension(session, group_id)
+    current_line = (
+        f"Текущий extension: <code>{html.escape(current)}</code>."
+        if current else "Extension пока не задан."
+    )
+    await state.update_data(set_ext_group_id=group_id)
+    await state.set_state(SetExtension.waiting_value)
+    await callback.message.edit_text(
+        f"Группа <b>{html.escape(group.name)}</b> ({len(admins)} админ.).\n"
+        f"{current_line}\n\nВведите новый extension (например 502):",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(SetExtension.waiting_value)
+async def set_extension_value(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    group_id = data.get("set_ext_group_id")
+    new_value = (message.text or "").strip()
+    await state.clear()
+
+    if not new_value or len(new_value) > 32:
+        await message.answer(
+            "Значение должно быть непустым и не длиннее 32 символов. "
+            "Повторите: /set_extension"
+        )
+        return
+
+    group = await group_repo.get_by_id(session, group_id)
+    if group is None:
+        await message.answer("❌ Группа не найдена.")
+        return
+    admins = await user_repo.list_active_admins_by_group(session, group_id)
+    if not admins:
+        await message.answer(f"❌ В группе «{html.escape(group.name)}» больше нет активных администраторов.")
+        return
+
+    for admin in admins:
+        await user_repo.set_mango_extension(session, admin, new_value)
+
+    names = ", ".join(a.full_name or str(a.tg_id) for a in admins)
+    await message.answer(
+        f"✅ Extension <code>{html.escape(new_value)}</code> установлен для группы "
+        f"«{html.escape(group.name)}» ({len(admins)} чел.: {html.escape(names)})."
+    )
 
 
 # --------------------------------------------------------------------------- #

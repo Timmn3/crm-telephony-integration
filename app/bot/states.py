@@ -24,6 +24,11 @@ class EditGroup(StatesGroup):
     waiting_value = State()   # ввод нового значения
 
 
+class SetExtension(StatesGroup):
+    waiting_group = State()   # выбор группы из инлайн-кнопок
+    waiting_value = State()   # ввод нового значения extension
+
+
 class RemoveUser(StatesGroup):
     waiting_identifier = State()
 
