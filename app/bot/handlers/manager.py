@@ -17,14 +17,8 @@ from app.bot.utils import format_group_lines
 from app.bot.keyboards.inline import operator_call_request_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.db.models import OrderStatus, User, UserRole
-from app.db.repositories import call_log_repo, group_repo, order_repo, user_repo
-from app.services import order_service
-from app.services.mango import (
-    MangoClient,
-    MangoConfigError,
-    MangoError,
-    MangoExtensionMissingError,
-)
+from app.db.repositories import group_repo, order_repo, user_repo
+from app.services import call_service, order_service
 from app.utils.phone import normalize_phone
 
 logger = logging.getLogger(__name__)
@@ -156,47 +150,15 @@ async def make_call(
         )
         return
 
-    # Инициируем звонок. order.client_phone передаётся только в Mango и не логируется.
-    # Маскирующий номер (line_number) берётся из конфига внутри MangoClient.
-    # extension — персональный внутренний номер бригады в ВАТС Mango, обязателен.
-    mango = MangoClient()
-    try:
-        command_id, _result = await mango.initiate_callback(
-            manager_phone=user.phone,
-            client_phone=order.client_phone,
-            order_id=order.id,
-            extension=user.mango_extension,
-        )
-    except MangoError as exc:
-        await call_log_repo.create(
-            session, order_id=order.id, manager_tg_id=user.tg_id,
-            mango_command_id="", status="error",
-        )
-        logger.error("Ошибка инициации звонка по заявке #%s: %s", order.id, exc)
-        # Конфиг не настроен — «позже» не поможет, нужна правка на сервере/в БД.
-        # Различаем причины, чтобы не вводить админа в заблуждение.
-        if isinstance(exc, MangoExtensionMissingError):
-            msg = "У вас не настроен персональный номер для звонков. Сообщите разработчику."
-        elif isinstance(exc, MangoConfigError):
-            msg = "Звонки временно недоступны (не настроен маскирующий номер). Сообщите разработчику."
-        else:
-            msg = "Не удалось инициировать звонок, попробуйте позже."
-        await callback.answer(msg, show_alert=True)
+    # Сам звонок — в call_service: ту же последовательность запускает фоновый воркер
+    # сценария «звонок-сигнал», и расходиться они не должны.
+    result = await call_service.start_call(session, bot, order, user, source="button")
+    if not result.ok:
+        await callback.answer(result.message, show_alert=True)
         return
 
-    await order_repo.set_status(session, order, OrderStatus.CALL_IN_PROGRESS)
-    await call_log_repo.create(
-        session, order_id=order.id, manager_tg_id=user.tg_id,
-        mango_command_id=command_id, status="initiated",
-    )
-    await order_service.refresh_card(bot, order)
     await callback.answer()
-    await _notify(
-        bot, user.tg_id,
-        "📞 Звонок инициирован. Ожидайте — Mango перезвонит вам на ваш номер, "
-        "а затем соединит с клиентом.",
-    )
-    logger.info("Звонок по заявке #%s инициирован администратором tg_id=%s", order.id, user.tg_id)
+    await _notify(bot, user.tg_id, result.message)
 
 
 # --------------------------------------------------------------------------- #
