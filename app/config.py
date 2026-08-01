@@ -75,6 +75,20 @@ class Settings(BaseSettings):
     # телефон клиента в прототип не попадает.
     mango_test_target: str = Field("", alias="MANGO_TEST_TARGET")
 
+    # ------------------------------------------------------------------ Звонок-сигнал
+    # Админ без интернета звонит на служебную линию и кладёт трубку, бот видит этот
+    # звонок в статистике Mango и сам инициирует callback. Соединяет именно callback,
+    # поэтому маска (line_number) задаётся нами и настройки ВАТС трогать не нужно.
+    call_trigger_enabled: bool = Field(False, alias="CALL_TRIGGER_ENABLED")
+    # Как часто опрашивать статистику, ПОКА есть одобренные заявки. Лимит Mango —
+    # 1 запрос в 2 секунды на всю ВАТС (делим его с интеграцией amoCRM), плюс данные
+    # всё равно отстают на 1-2 минуты, поэтому чаще смысла нет.
+    call_trigger_poll_sec: int = Field(15, alias="CALL_TRIGGER_POLL_SEC")
+    # Пауза, когда одобренных заявок нет: в это время API не дёргаем вообще.
+    call_trigger_idle_sec: int = Field(60, alias="CALL_TRIGGER_IDLE_SEC")
+    # Глубина выборки статистики. С запасом на задержку Mango и краткие сбои опроса.
+    call_trigger_window_min: int = Field(15, alias="CALL_TRIGGER_WINDOW_MIN")
+
     # ------------------------------------------------------------------ Сервер
     server_host: str = Field("0.0.0.0", alias="SERVER_HOST")
     server_port: int = Field(8080, alias="SERVER_PORT")
@@ -150,6 +164,16 @@ class Settings(BaseSettings):
             and self.mango_test_caller
             and self.mango_test_target
         )
+
+    @property
+    def call_trigger_active(self) -> bool:
+        """True, если сценарий «звонок-сигнал» полностью настроен.
+
+        Мало включить флаг: без служебной линии непонятно, какие входящие считать
+        сигналом, а на остальные номера ВАТС идут звонки пациентов в колл-центр.
+        Пока номер не задан, воркер спит и в API не ходит.
+        """
+        return bool(self.call_trigger_enabled and self.mango_service_line)
 
     @property
     def amocrm_base_url(self) -> str:

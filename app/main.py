@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.db.database import async_session_factory, dispose_engine, init_db
 from app.logging_config import setup_logging
 from app.services.bootstrap import ensure_amo_token, report_admins_without_extension, seed_groups
+from app.services.call_trigger import run_call_trigger
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ async def main() -> None:
         await asyncio.gather(
             dp.start_polling(bot),
             server.serve(),
+            run_call_trigger(bot),
         )
     finally:
         await bot.session.close()

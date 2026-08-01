@@ -135,6 +135,44 @@ async def list_active_by_manager(
     return list(result.scalars().all())
 
 
+async def count_approved(session: AsyncSession) -> int:
+    """Сколько заявок ждут звонка (статус CALL_APPROVED).
+
+    Воркер «звонка-сигнала» опрашивает API Mango, только если это число больше нуля:
+    нет одобренных — некого соединять, значит и дёргать статистику незачем.
+    """
+    from sqlalchemy import func as sqlfunc
+    result = await session.execute(
+        select(sqlfunc.count()).select_from(Order).where(
+            Order.status == OrderStatus.CALL_APPROVED
+        )
+    )
+    return result.scalar_one()
+
+
+async def get_approved_by_manager(
+    session: AsyncSession, manager_tg_id: int
+) -> Order | None:
+    """Самая свежеодобренная заявка администратора, ожидающая звонка.
+
+    ВНИМАНИЕ: `manager_tg_id` — это tg_id выездного АДМИНИСТРАТОРА (получателя
+    заявки), а не менеджера; исторические имена полей в модели сбивают с толку.
+
+    Если у администратора одобрено несколько заявок, из одного звонка невозможно
+    понять, какая нужна — берём последнюю одобренную. Это осознанное ограничение,
+    оно озвучено заказчику.
+    """
+    result = await session.execute(
+        select(Order)
+        .where(
+            Order.manager_tg_id == manager_tg_id,
+            Order.status == OrderStatus.CALL_APPROVED,
+        )
+        .order_by(Order.call_approved_at.desc().nullslast())
+    )
+    return result.scalars().first()
+
+
 async def get_active_by_amo_lead_id(
     session: AsyncSession, amo_lead_id: int
 ) -> Order | None:

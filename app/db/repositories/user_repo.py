@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,33 @@ async def get_by_tg_id(session: AsyncSession, tg_id: int) -> User | None:
 
 async def get_by_id(session: AsyncSession, user_id: int) -> User | None:
     return await session.get(User, user_id)
+
+
+async def get_admin_by_phone(session: AsyncSession, phone: str) -> User | None:
+    """Активный выездной администратор с таким номером телефона.
+
+    Нужен сценарию «звонок-сигнал»: по АОН входящего на служебную линию находим,
+    кто из бригад звонил. Сравниваем по последним 10 цифрам — так совпадение не
+    зависит от того, записан номер как 7XXXXXXXXXX или 8XXXXXXXXXX (Mango отдаёт
+    в разных форматах: в статистике с 7, в правилах переадресации с 8).
+
+    Роль и активность проверяем здесь же: звонок с номера уволенного сотрудника
+    или менеджера не должен ничего запускать.
+    """
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) < 10:
+        return None
+    tail = digits[-10:]
+
+    result = await session.execute(
+        select(User).where(
+            User.role == UserRole.ADMIN,
+            User.is_active.is_(True),
+            User.phone.isnot(None),
+            func.right(User.phone, 10) == tail,
+        )
+    )
+    return result.scalars().first()
 
 
 async def get_by_username(session: AsyncSession, username: str) -> User | None:
