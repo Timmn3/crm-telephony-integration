@@ -238,3 +238,25 @@ class AmoToken(Base):
 
     def __repr__(self) -> str:
         return f"<AmoToken id={self.id} expires_at={self.expires_at}>"
+
+
+class AppSetting(Base):
+    """Настройки времени выполнения (key/value), меняются командами бота.
+
+    Живут в БД, а не в .env, чтобы менять их без перезапуска контейнера
+    (напр. таймаут автозакрытия заявок — команда /autoclose).
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<AppSetting key={self.key} value={self.value}>"

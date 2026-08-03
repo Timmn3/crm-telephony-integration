@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Order, OrderStatus
@@ -190,3 +190,35 @@ async def get_active_by_amo_lead_id(
         .order_by(Order.created_at.desc())
     )
     return result.scalars().first()
+
+
+async def count_stale(session: AsyncSession, cutoff: datetime) -> int:
+    """Сколько активных заявок не обновлялись с момента cutoff."""
+    result = await session.execute(
+        select(func.count()).select_from(Order).where(
+            Order.status.in_(ACTIVE_STATUSES),
+            Order.updated_at < cutoff,
+        )
+    )
+    return result.scalar_one()
+
+
+async def close_stale(session: AsyncSession, cutoff: datetime) -> int:
+    """Закрывает активные заявки, не обновлявшиеся с cutoff. Возвращает количество.
+
+    Карточки в Telegram сознательно не трогаем — кнопки на них остаются, заявка
+    просто уходит из активных выборок и перестаёт блокировать дубли по лиду.
+    updated_at проставляем явно: при bulk-обновлении onupdate из модели не срабатывает.
+    """
+    result = await session.execute(
+        update(Order)
+        .where(
+            Order.status.in_(ACTIVE_STATUSES),
+            Order.updated_at < cutoff,
+        )
+        .values(status=OrderStatus.COMPLETED, updated_at=func.now())
+    )
+    closed = result.rowcount or 0
+    if closed:
+        logger.info("Автозакрытие: закрыто %d заявок (не обновлялись с %s)", closed, cutoff)
+    return closed

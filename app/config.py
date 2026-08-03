@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ Прочее
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     coder_tg_id: int | None = Field(None, alias="CODER")
+    # Через сколько часов бездействия заявка закрывается автоматически. 0 — выключено.
+    # Это стартовое значение; фактическое живёт в app_settings и меняется /autoclose.
+    order_autoclose_hours: int = Field(24, alias="ORDER_AUTOCLOSE_HOURS")
 
     @field_validator("amo_address_field_id", "amo_phone_field_id", mode="before")
     @classmethod

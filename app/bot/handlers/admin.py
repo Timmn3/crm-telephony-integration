@@ -1,7 +1,8 @@
 """Обработчики команд директора.
 
 Команды: /add_group, /groups, /edit_group, /delete_group, /add_manager,
-/add_admin, /set_extension, /users, /remove_user, /amo_fields, /set_amo_code.
+/add_admin, /set_extension, /autoclose, /users, /remove_user, /amo_fields,
+/set_amo_code.
 
 Примечание про Telegram: бот не может узнать tg_id по @username и не может
 написать пользователю первым, пока тот сам не обратится к боту. Способы добавить
@@ -22,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.commands import set_commands_for_user
 from app.bot.utils import format_group_lines
-from app.bot.filters.role import IsDirector
+from app.bot.filters.role import IsDirector, IsDirectorOrCoder
 from app.bot.keyboards.inline import (
     cancel_keyboard,
     confirm_delete_group_keyboard,
@@ -43,6 +44,7 @@ from app.bot.states import (
 )
 from app.db.models import User, UserRole
 from app.db.repositories import group_repo, order_repo, pending_repo, user_repo
+from app.services import order_service
 from app.services.amocrm import AmoCRMClient, AmoCRMError
 
 logger = logging.getLogger(__name__)
@@ -657,6 +659,79 @@ async def set_extension_value(message: Message, state: FSMContext, session: Asyn
     await message.answer(
         f"✅ Extension <code>{html.escape(new_value)}</code> установлен для группы "
         f"«{html.escape(group.name)}» ({len(admins)} чел.: {html.escape(names)})."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Автозакрытие зависших заявок
+# --------------------------------------------------------------------------- #
+
+_AUTOCLOSE_MAX_HOURS = 720  # месяц — верхняя граница вменяемого таймаута
+
+
+@router.message(Command("autoclose"), IsDirectorOrCoder)
+async def autoclose_settings(
+    message: Message, command: CommandObject, session: AsyncSession
+) -> None:
+    """Показывает/меняет таймаут автозакрытия заявок.
+
+    /autoclose — статус, /autoclose off — выключить, /autoclose 48 — включить на 48ч.
+    """
+    arg = (command.args or "").strip().lower()
+
+    # Без аргументов — показываем текущее состояние.
+    if not arg:
+        hours = await order_service.get_autoclose_hours(session)
+        if hours <= 0:
+            await message.answer(
+                "🔕 Автозакрытие заявок <b>выключено</b>.\n"
+                "Включить: <code>/autoclose 24</code> (число часов)."
+            )
+            return
+        stale = await order_repo.count_stale(
+            session, order_service.autoclose_cutoff(hours)
+        )
+        await message.answer(
+            f"🔄 Автозакрытие <b>включено</b>: заявка закрывается через "
+            f"<b>{hours} ч</b> без изменений.\n"
+            f"Сейчас под таймаут подпадает заявок: <b>{stale}</b>.\n\n"
+            "Выключить: <code>/autoclose off</code>\n"
+            "Сменить таймаут: <code>/autoclose 48</code>"
+        )
+        return
+
+    if arg in ("off", "0", "выкл"):
+        await order_service.set_autoclose_hours(session, 0)
+        await message.answer(
+            "🔕 Автозакрытие выключено. Заявки будут закрываться только вручную.\n"
+            "Вернуть: <code>/autoclose 24</code>"
+        )
+        logger.info("Автозакрытие выключено пользователем tg_id=%s", message.from_user.id)
+        return
+
+    if not arg.isdigit():
+        await message.answer(
+            "Нужно число часов или <code>off</code>.\n"
+            "Примеры: <code>/autoclose 24</code>, <code>/autoclose off</code>"
+        )
+        return
+
+    hours = int(arg)
+    if not 1 <= hours <= _AUTOCLOSE_MAX_HOURS:
+        await message.answer(
+            f"Таймаут должен быть от 1 до {_AUTOCLOSE_MAX_HOURS} часов."
+        )
+        return
+
+    await order_service.set_autoclose_hours(session, hours)
+    stale = await order_repo.count_stale(session, order_service.autoclose_cutoff(hours))
+    await message.answer(
+        f"✅ Автозакрытие включено: <b>{hours} ч</b> без изменений — и заявка закроется.\n"
+        f"Под новый таймаут сейчас подпадает заявок: <b>{stale}</b> "
+        "(закроются в ближайший час)."
+    )
+    logger.info(
+        "Таймаут автозакрытия = %sч (пользователь tg_id=%s)", hours, message.from_user.id
     )
 
 

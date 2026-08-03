@@ -1,8 +1,14 @@
 """Интеграционные тесты репозиториев (реальный Postgres)."""
 from datetime import datetime, timedelta, timezone
 
-from app.db.models import OrderStatus, UserRole
-from app.db.repositories import amo_token_repo, group_repo, order_repo, user_repo
+from app.db.models import Order, OrderStatus, UserRole
+from app.db.repositories import (
+    amo_token_repo,
+    app_setting_repo,
+    group_repo,
+    order_repo,
+    user_repo,
+)
 
 
 async def test_group_crud(session):
@@ -166,6 +172,63 @@ async def test_get_active_by_amo_lead_id(session):
     assert await order_repo.get_active_by_amo_lead_id(session, 778) is None
 
     assert await order_repo.get_active_by_amo_lead_id(session, 999999) is None
+
+
+async def test_app_setting_get_set(session):
+    key = app_setting_repo.AUTOCLOSE_HOURS
+    assert await app_setting_repo.get(session, key) is None
+    # Нет записи — берётся значение по умолчанию.
+    assert await app_setting_repo.get_int(session, key, 24) == 24
+
+    await app_setting_repo.set_value(session, key, "48")
+    assert await app_setting_repo.get_int(session, key, 24) == 48
+
+    # Перезапись существующего ключа, а не второй записи.
+    await app_setting_repo.set_value(session, key, "0")
+    assert await app_setting_repo.get_int(session, key, 24) == 0
+
+    # Мусор в значении не должен молча ломать механизм.
+    await app_setting_repo.set_value(session, key, "не число")
+    assert await app_setting_repo.get_int(session, key, 24) == 24
+
+
+async def _make_order(session, group_id: int, lead_id: int, *, status=None) -> Order:
+    order = await order_repo.create(
+        session, amo_lead_id=lead_id, client_name="К", client_phone="79990000000",
+        group_id=group_id, operator_tg_id=999, manager_tg_id=888,
+    )
+    if status is not None:
+        await order_repo.set_status(session, order, status)
+    return order
+
+
+async def test_close_stale_closes_only_old_active(session):
+    group = await group_repo.create(session, "Группа-Стейл", "Город-С")
+    now = datetime.now(timezone.utc)
+
+    old_active = await _make_order(session, group.id, 900001,
+                                   status=OrderStatus.CALL_IN_PROGRESS)
+    fresh_active = await _make_order(session, group.id, 900002)
+    already_closed = await _make_order(session, group.id, 900003,
+                                       status=OrderStatus.COMPLETED)
+
+    # Состариваем только первую заявку (updated_at выставляем напрямую).
+    old_active.updated_at = now - timedelta(hours=48)
+    already_closed.updated_at = now - timedelta(hours=48)
+    await session.flush()
+
+    cutoff = now - timedelta(hours=24)
+    assert await order_repo.count_stale(session, cutoff) == 1
+
+    closed = await order_repo.close_stale(session, cutoff)
+    assert closed == 1
+
+    await session.refresh(old_active)
+    await session.refresh(fresh_active)
+    assert old_active.status == OrderStatus.COMPLETED   # старая закрыта
+    assert fresh_active.status == OrderStatus.SENT      # свежую не тронули
+    # Повторный прогон закрывать уже нечего.
+    assert await order_repo.close_stale(session, cutoff) == 0
 
 
 async def test_amo_token_upsert(session):

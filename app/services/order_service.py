@@ -9,8 +9,10 @@ Order (tg_chat_id/tg_message_id).
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 from aiogram import Bot
@@ -18,11 +20,16 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.inline import manager_card_keyboard
+from app.config import get_settings
+from app.db.database import get_session
 from app.db.models import Order, OrderStatus
-from app.db.repositories import order_repo
+from app.db.repositories import app_setting_repo, order_repo
 from app.utils.phone import strip_phones
 
 logger = logging.getLogger(__name__)
+
+# Как часто воркер проверяет зависшие заявки (сам таймаут задаётся /autoclose).
+_AUTOCLOSE_INTERVAL_SEC = 3600
 
 
 # --------------------------------------------------------------------------- #
@@ -123,3 +130,59 @@ async def refresh_card(bot: Bot, order: Order) -> None:
     except TelegramBadRequest as exc:
         # «message is not modified» / устаревшее сообщение — не критично.
         logger.debug("Не удалось обновить карточку заявки #%s: %s", order.id, exc)
+
+
+# --------------------------------------------------------------------------- #
+# Автозакрытие зависших заявок
+# --------------------------------------------------------------------------- #
+
+async def get_autoclose_hours(session: AsyncSession) -> int:
+    """Актуальный таймаут автозакрытия: из app_settings, иначе дефолт из .env."""
+    return await app_setting_repo.get_int(
+        session,
+        app_setting_repo.AUTOCLOSE_HOURS,
+        get_settings().order_autoclose_hours,
+    )
+
+
+async def set_autoclose_hours(session: AsyncSession, hours: int) -> None:
+    """Сохраняет таймаут автозакрытия (0 — выключить)."""
+    await app_setting_repo.set_value(
+        session, app_setting_repo.AUTOCLOSE_HOURS, str(hours)
+    )
+
+
+def autoclose_cutoff(hours: int) -> datetime:
+    """Момент, старше которого заявка считается зависшей."""
+    return datetime.now(timezone.utc) - timedelta(hours=hours)
+
+
+async def close_stale_orders(session: AsyncSession, hours: int) -> int:
+    """Закрывает заявки, с которыми не работали дольше hours. Возвращает количество.
+
+    Карточки в Telegram не трогаем — кнопки на них остаются как были.
+    """
+    if hours <= 0:
+        return 0
+    return await order_repo.close_stale(session, autoclose_cutoff(hours))
+
+
+async def run_autoclose(interval_sec: int = _AUTOCLOSE_INTERVAL_SEC) -> None:
+    """Фоновый цикл автозакрытия. Запускается из app/main.py рядом с polling.
+
+    Настройка перечитывается на каждой итерации, поэтому /autoclose действует без
+    перезапуска бота. Ошибки внутри не должны ронять задачу: она живёт в общем
+    `asyncio.gather`, и её падение остановило бы бота целиком.
+    """
+    logger.info("Воркер автозакрытия заявок запущен (проверка раз в %d сек)", interval_sec)
+    while True:
+        try:
+            async with get_session() as session:
+                hours = await get_autoclose_hours(session)
+                if hours > 0:
+                    await close_stale_orders(session, hours)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ошибка автозакрытия заявок")
+        await asyncio.sleep(interval_sec)

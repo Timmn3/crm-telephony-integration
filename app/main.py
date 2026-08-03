@@ -14,6 +14,7 @@ from app.db.database import async_session_factory, dispose_engine, init_db
 from app.logging_config import setup_logging
 from app.services.bootstrap import ensure_amo_token, report_admins_without_extension, seed_groups
 from app.services.call_trigger import run_call_trigger
+from app.services.order_service import run_autoclose
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ async def main() -> None:
             dp.start_polling(bot),
             server.serve(),
             run_call_trigger(bot),
+            run_autoclose(),
         )
     finally:
         await bot.session.close()
