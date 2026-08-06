@@ -124,8 +124,10 @@ class _SessionProxy:
 @pytest.fixture(autouse=True)
 def _clear_handled():
     call_trigger._handled_calls.clear()
+    call_trigger._nudged_orders.clear()
     yield
     call_trigger._handled_calls.clear()
+    call_trigger._nudged_orders.clear()
 
 
 @pytest.fixture
@@ -214,12 +216,103 @@ async def test_ignores_unknown_caller(session, trigger_settings, started, fake_b
     assert started == []
 
 
-async def test_ignores_when_no_approved_order(session, trigger_settings, started, fake_bot):
-    """Админ позвонил, но одобренной заявки нет — звонка нет, зато есть подсказка."""
-    await _make_order(session, status=OrderStatus.SENT)
+async def test_no_active_orders_only_notifies_admin(session, trigger_settings,
+                                                    started, fake_bot):
+    """Активных заявок нет — звонить некуда, менеджера дёргать незачем."""
+    group = await group_repo.create(session, name="G-empty", city="Тест")
+    admin = await user_repo.create(
+        session, tg_id=555000111, role=UserRole.ADMIN,
+        full_name="Без заявок", group_id=group.id, phone=ADMIN_PHONE,
+    )
+    await session.flush()
+
     await call_trigger._handle_incoming(fake_bot, trigger_settings, _event())
     assert started == []
-    assert any("одобренным" in m["text"] for m in fake_bot.sent)
+    assert any(m["chat_id"] == admin.tg_id and "активных заявок" in m["text"]
+               for m in fake_bot.sent)
+
+
+# --------------------------------------------------------------------------- #
+# Эскалация: звонок вместо кнопки «Запросить звонок»
+# --------------------------------------------------------------------------- #
+
+MANAGER_TG_ID = 999999   # operator_tg_id, который проставляет _make_order
+
+
+async def test_sent_order_becomes_call_request(session, trigger_settings,
+                                               started, fake_bot):
+    """Админ без интернета не может нажать кнопку — звонок делает это за него."""
+    admin, order = await _make_order(session, status=OrderStatus.SENT)
+
+    await call_trigger._handle_incoming(fake_bot, trigger_settings, _event())
+
+    assert started == []                       # звонить пока рано, нужно одобрение
+    assert order.status == OrderStatus.CALL_REQUESTED
+    assert order.call_requested_at is not None
+
+    to_manager = [m for m in fake_bot.sent if m["chat_id"] == MANAGER_TG_ID]
+    assert len(to_manager) == 1
+    assert "Запрос на звонок" in to_manager[0]["text"]
+    assert to_manager[0]["reply_markup"] is not None   # кнопки Одобрить/Отклонить
+
+
+async def test_requested_order_nudges_manager(session, trigger_settings,
+                                              started, fake_bot):
+    """Заявка уже ждёт одобрения — статус не трогаем, менеджеру напоминаем."""
+    admin, order = await _make_order(session, status=OrderStatus.CALL_REQUESTED)
+
+    await call_trigger._handle_incoming(fake_bot, trigger_settings, _event())
+
+    assert started == []
+    assert order.status == OrderStatus.CALL_REQUESTED
+
+    to_manager = [m for m in fake_bot.sent if m["chat_id"] == MANAGER_TG_ID]
+    assert len(to_manager) == 1
+    assert "Напоминание" in to_manager[0]["text"]
+    assert "звонил на служебный номер" in to_manager[0]["text"]
+
+
+async def test_nudge_respects_cooldown(session, trigger_settings, started, fake_bot):
+    """Настойчивый админ не должен завалить менеджера одинаковыми сообщениями."""
+    await _make_order(session, status=OrderStatus.CALL_REQUESTED)
+
+    # Разные entry_id — иначе сработает дедупликация звонков, а не кулдаун.
+    await call_trigger._handle_incoming(fake_bot, trigger_settings, _event(entry_id=1))
+    await call_trigger._handle_incoming(fake_bot, trigger_settings, _event(entry_id=2))
+    await call_trigger._handle_incoming(fake_bot, trigger_settings, _event(entry_id=3))
+
+    to_manager = [m for m in fake_bot.sent if m["chat_id"] == MANAGER_TG_ID]
+    assert len(to_manager) == 1
+
+
+async def test_call_in_progress_ignored(session, trigger_settings, started, fake_bot):
+    """Звонок по заявке уже идёт — второй сигнал ничего не меняет."""
+    admin, order = await _make_order(session, status=OrderStatus.CALL_IN_PROGRESS)
+
+    await call_trigger._handle_incoming(fake_bot, trigger_settings, _event())
+
+    assert started == []
+    assert order.status == OrderStatus.CALL_IN_PROGRESS
+    assert [m for m in fake_bot.sent if m["chat_id"] == MANAGER_TG_ID] == []
+
+
+async def test_approved_order_wins_over_sent(session, trigger_settings,
+                                             started, fake_bot):
+    """Из нескольких заявок берём готовую к звонку, а не ждущую одобрения."""
+    admin, sent_order = await _make_order(session, status=OrderStatus.SENT)
+    approved = await order_repo.create(
+        session, amo_lead_id=777777, client_name="Клиент-2",
+        client_phone=CLIENT_PHONE, group_id=sent_order.group_id,
+        operator_tg_id=MANAGER_TG_ID, manager_tg_id=admin.tg_id,
+        status=OrderStatus.CALL_APPROVED,
+    )
+    approved.call_approved_at = datetime.now(timezone.utc) - timedelta(seconds=60)
+    await session.flush()
+
+    await call_trigger._handle_incoming(fake_bot, trigger_settings, _event())
+
+    assert started == [approved.id]
+    assert sent_order.status == OrderStatus.SENT   # вторую заявку не тронули
 
 
 async def test_ignores_call_made_before_approval(session, trigger_settings, started, fake_bot):

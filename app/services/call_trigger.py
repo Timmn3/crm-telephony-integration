@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 
@@ -27,8 +28,9 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from app.config import Settings, get_settings
 from app.db.database import async_session_factory
+from app.db.models import OrderStatus
 from app.db.repositories import order_repo, user_repo
-from app.services import call_service
+from app.services import call_service, order_service
 from app.services.mango import MangoClient, MangoError, MangoRateLimited
 from app.utils.phone import mask_phone
 
@@ -39,6 +41,10 @@ logger = logging.getLogger(__name__)
 # после перезапуска от повторов защищают статус заявки и отсечка по времени.
 _handled_calls: OrderedDict[str, None] = OrderedDict()
 _HANDLED_MAX = 500
+
+# Когда по заявке последний раз просили менеджера одобрить звонок (monotonic).
+# Нужен, чтобы настойчивые звонки админа не превратились в спам менеджеру.
+_nudged_orders: OrderedDict[int, float] = OrderedDict()
 
 
 def _digits(value: object) -> str:
@@ -59,6 +65,24 @@ def _already_handled(entry_id: str) -> bool:
     _handled_calls[entry_id] = None
     while len(_handled_calls) > _HANDLED_MAX:
         _handled_calls.popitem(last=False)
+    return False
+
+
+def _nudge_on_cooldown(order_id: int) -> bool:
+    """True — напоминание по этой заявке отправляли только что, второе не шлём.
+
+    Админ может звонить настойчиво (связь плохая, кажется что не сработало), а
+    менеджеру от десятка одинаковых сообщений подряд толку нет.
+    """
+    cooldown = get_settings().call_trigger_nudge_cooldown_min * 60
+    now = time.monotonic()
+    last = _nudged_orders.get(order_id)
+    if last is not None and now - last < cooldown:
+        return True
+    _nudged_orders[order_id] = now
+    _nudged_orders.move_to_end(order_id)
+    while len(_nudged_orders) > _HANDLED_MAX:
+        _nudged_orders.popitem(last=False)
     return False
 
 
@@ -85,40 +109,75 @@ async def _handle_incoming(bot: Bot, settings: Settings, call: dict) -> None:
     logger.info("Сигнал на служебную линию: from=%s entry=%s",
                 mask_phone(caller), entry_id)
 
+    started = call.get("context_start_time")
+
     async with async_session_factory() as session:
         admin = await user_repo.get_admin_by_phone(session, caller)
         if admin is None:
             logger.info("Сигнал с неизвестного номера %s — игнорируем", mask_phone(caller))
             return
 
-        order = await order_repo.get_approved_by_manager(session, admin.tg_id)
+        order = await order_repo.get_active_for_signal(session, admin.tg_id)
         if order is None:
-            logger.info("У администратора tg_id=%s нет одобренной заявки — игнорируем",
+            logger.info("У администратора tg_id=%s нет активных заявок — игнорируем",
                         admin.tg_id)
             await _notify(
                 bot, admin.tg_id,
-                "☎️ Вы позвонили на служебный номер, но у вас нет заявки с одобренным "
-                "звонком. Запросите одобрение у менеджера и позвоните ещё раз.",
+                "☎️ Вы позвонили на служебный номер, но активных заявок за вами нет.",
             )
             return
 
-        # Звонок должен быть ПОСЛЕ одобрения: иначе вчерашний сигнал поднимет
-        # сегодняшнюю заявку, как только её одобрят.
-        started = call.get("context_start_time")
-        if not _is_after_approval(started, order.call_approved_at):
-            logger.info("Сигнал старше одобрения заявки #%s — игнорируем", order.id)
-            return
-
-        if not admin.phone:
-            logger.warning("У администратора tg_id=%s нет телефона в профиле", admin.tg_id)
-            return
-
-        result = await call_service.start_call(
-            session, bot, order, admin, source="trigger"
-        )
+        reply = await _act_on_order(bot, session, admin, order, started)
         await session.commit()
 
-    await _notify(bot, admin.tg_id, result.message)
+    if reply:
+        await _notify(bot, admin.tg_id, reply)
+
+
+async def _act_on_order(bot: Bot, session, admin, order, started) -> str | None:
+    """Решает, что делать со звонком, исходя из статуса заявки.
+
+    Возвращает текст для администратора (или None, если писать нечего). Админ
+    звонит без интернета и увидит сообщение позже — но когда увидит, должен
+    понять, что произошло.
+    """
+    if order.status == OrderStatus.CALL_IN_PROGRESS:
+        logger.info("По заявке #%s звонок уже идёт — сигнал игнорируем", order.id)
+        return None
+
+    if order.status == OrderStatus.CALL_APPROVED:
+        # Звонок должен быть ПОСЛЕ одобрения: иначе вчерашний сигнал поднимет
+        # сегодняшнюю заявку, как только её одобрят.
+        if not _is_after_approval(started, order.call_approved_at):
+            logger.info("Сигнал старше одобрения заявки #%s — игнорируем", order.id)
+            return None
+        if not admin.phone:
+            logger.warning("У администратора tg_id=%s нет телефона в профиле", admin.tg_id)
+            return None
+        result = await call_service.start_call(session, bot, order, admin, source="trigger")
+        return result.message
+
+    # Осталось SENT и CALL_REQUESTED: звонок работает как «запросить звонок» —
+    # админу для этого не нужен Telegram, в чём и весь смысл сценария.
+    if _nudge_on_cooldown(order.id):
+        logger.info("Напоминание по заявке #%s недавно отправляли — пропускаем", order.id)
+        return None
+
+    was_requested = order.status == OrderStatus.CALL_REQUESTED
+    if not was_requested:
+        await order_repo.set_status(
+            session, order, OrderStatus.CALL_REQUESTED, set_call_requested_at=True
+        )
+        await order_service.refresh_card(bot, order)
+
+    await order_service.notify_call_request(bot, order, admin, repeated=was_requested)
+    logger.info("Заявка #%s: менеджеру отправлен %s одобрения (сигнал с телефона)",
+                order.id, "повторный запрос" if was_requested else "запрос")
+    return (
+        "📨 Менеджеру отправлено напоминание — ждём одобрения звонка."
+        if was_requested else
+        "📨 Запрос на звонок отправлен менеджеру. Как одобрит — позвоните ещё раз."
+    )
 
 
 def _is_after_approval(started: object, approved_at: datetime | None) -> bool:
@@ -149,7 +208,8 @@ async def _tick(bot: Bot, settings: Settings) -> bool:
 
 
 async def run_call_trigger(bot: Bot) -> None:
-    """Фоновый цикл опроса. Запускается из app/main.py рядом с polling и uvicorn.
+    """Фоновый цикл опроса. Запускается из app/main.py рядом с polling, uvicorn
+    и воркером автозакрытия заявок.
 
     Ни одна ошибка внутри не должна ронять задачу: она живёт в общем
     `asyncio.gather`, и её падение остановило бы бота целиком.

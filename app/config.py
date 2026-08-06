@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     call_trigger_idle_sec: int = Field(60, alias="CALL_TRIGGER_IDLE_SEC")
     # Глубина выборки статистики. С запасом на задержку Mango и краткие сбои опроса.
     call_trigger_window_min: int = Field(15, alias="CALL_TRIGGER_WINDOW_MIN")
+    # Если админ звонит, а заявка ещё не одобрена, менеджеру уходит напоминание.
+    # Чтобы настойчивый админ не завалил менеджера сообщениями — не чаще раза в N минут
+    # на одну заявку.
+    call_trigger_nudge_cooldown_min: int = Field(5, alias="CALL_TRIGGER_NUDGE_COOLDOWN_MIN")
 
     # ------------------------------------------------------------------ Сервер
     server_host: str = Field("0.0.0.0", alias="SERVER_HOST")

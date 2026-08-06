@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Order, OrderStatus
@@ -169,6 +169,35 @@ async def get_approved_by_manager(
             Order.status == OrderStatus.CALL_APPROVED,
         )
         .order_by(Order.call_approved_at.desc().nullslast())
+    )
+    return result.scalars().first()
+
+
+async def get_active_for_signal(
+    session: AsyncSession, manager_tg_id: int
+) -> Order | None:
+    """Заявка, к которой относится звонок админа на служебную линию.
+
+    Из голосового звонка невозможно понять, какая заявка нужна, поэтому берём одну
+    по приоритету статусов: готовую к звонку → ждущую одобрения → только что
+    полученную → уже звонящую. Внутри статуса — самая свежая.
+
+    `manager_tg_id` — это tg_id выездного АДМИНИСТРАТОРА (историческое имя поля).
+    """
+    priority = case(
+        (Order.status == OrderStatus.CALL_APPROVED, 1),
+        (Order.status == OrderStatus.CALL_REQUESTED, 2),
+        (Order.status == OrderStatus.SENT, 3),
+        (Order.status == OrderStatus.CALL_IN_PROGRESS, 4),
+        else_=99,
+    )
+    result = await session.execute(
+        select(Order)
+        .where(
+            Order.manager_tg_id == manager_tg_id,
+            Order.status.in_(ACTIVE_STATUSES),
+        )
+        .order_by(priority, Order.created_at.desc())
     )
     return result.scalars().first()
 

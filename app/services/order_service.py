@@ -19,10 +19,10 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.inline import manager_card_keyboard
+from app.bot.keyboards.inline import manager_card_keyboard, operator_call_request_keyboard
 from app.config import get_settings
 from app.db.database import get_session
-from app.db.models import Order, OrderStatus
+from app.db.models import Order, OrderStatus, User
 from app.db.repositories import app_setting_repo, order_repo
 from app.utils.phone import strip_phones
 
@@ -130,6 +130,48 @@ async def refresh_card(bot: Bot, order: Order) -> None:
     except TelegramBadRequest as exc:
         # «message is not modified» / устаревшее сообщение — не критично.
         logger.debug("Не удалось обновить карточку заявки #%s: %s", order.id, exc)
+
+
+# --------------------------------------------------------------------------- #
+# Запрос звонка: уведомление менеджера
+# --------------------------------------------------------------------------- #
+
+async def notify_call_request(
+    bot: Bot, order: Order, admin: User, *, repeated: bool = False
+) -> None:
+    """Просит менеджера-создателя одобрить звонок по заявке.
+
+    Один и тот же текст уходит и по кнопке «Запросить звонок», и когда админ без
+    интернета позвонил на служебную линию: у менеджера в обоих случаях должны быть
+    кнопки «Одобрить / Отклонить».
+
+    `repeated=True` — админ уже ждёт одобрения и позвонил ещё раз; добавляем строку,
+    чтобы менеджер понимал, что это напоминание, а не новый запрос.
+    """
+    name = (
+        admin.full_name
+        or (f"@{admin.tg_username}" if admin.tg_username else str(admin.tg_id))
+    )
+    head = "🔔 <b>Запрос на звонок</b>" if not repeated else "⏰ <b>Напоминание: ждут одобрения</b>"
+    lines = [
+        head,
+        f"Администратор {html.escape(name)} просит разрешение позвонить клиенту.",
+        f"Заявка #{order.amo_lead_id}",
+        f"Клиент: {html.escape(order.client_name)}",
+    ]
+    if repeated:
+        lines.append("")
+        lines.append("📲 Он звонил на служебный номер — значит ждёт прямо сейчас.")
+
+    try:
+        await bot.send_message(
+            order.operator_tg_id,
+            "\n".join(lines),
+            reply_markup=operator_call_request_keyboard(order.id),
+        )
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+        logger.warning("Не удалось уведомить менеджера tg_id=%s: %s",
+                       order.operator_tg_id, exc)
 
 
 # --------------------------------------------------------------------------- #

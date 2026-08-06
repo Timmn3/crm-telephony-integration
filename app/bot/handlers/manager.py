@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters.role import IsAdmin
 from app.bot.utils import format_group_lines
-from app.bot.keyboards.inline import operator_call_request_keyboard
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
 from app.db.models import OrderStatus, User, UserRole
 from app.db.repositories import group_repo, order_repo, user_repo
@@ -112,15 +111,9 @@ async def request_call(
     await order_service.refresh_card(bot, order)
     await callback.answer("Запрос на звонок отправлен менеджеру.")
 
-    name = user.full_name or (f"@{user.tg_username}" if user.tg_username else str(user.tg_id))
-    await _notify(
-        bot, order.operator_tg_id,
-        f"🔔 <b>Запрос на звонок</b>\n"
-        f"Администратор {html.escape(name)} просит разрешение позвонить клиенту.\n"
-        f"Заявка #{order.amo_lead_id}\n"
-        f"Клиент: {html.escape(order.client_name)}",
-        reply_markup=operator_call_request_keyboard(order.id),
-    )
+    # Тот же текст и те же кнопки уходят менеджеру, когда админ без интернета
+    # просит одобрения звонком на служебную линию — логика общая, в order_service.
+    await order_service.notify_call_request(bot, order, user)
     logger.info("Администратор tg_id=%s запросил звонок по заявке #%s", user.tg_id, order_id)
 
 
