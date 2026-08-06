@@ -135,16 +135,26 @@ async def list_active_by_manager(
     return list(result.scalars().all())
 
 
-async def count_approved(session: AsyncSession) -> int:
-    """Сколько заявок ждут звонка (статус CALL_APPROVED).
+# Статусы, при которых звонок админа на служебную линию что-то значит: по одобренной
+# заявке он соединяет, по остальным двум — работает как запрос одобрения. Заявку в
+# CALL_IN_PROGRESS сюда не включаем: звонок по ней уже идёт.
+SIGNAL_STATUSES = (
+    OrderStatus.SENT,
+    OrderStatus.CALL_REQUESTED,
+    OrderStatus.CALL_APPROVED,
+)
+
+
+async def count_awaiting_signal(session: AsyncSession) -> int:
+    """Сколько заявок, по которым звонок админа имеет смысл.
 
     Воркер «звонка-сигнала» опрашивает API Mango, только если это число больше нуля:
-    нет одобренных — некого соединять, значит и дёргать статистику незачем.
+    нет таких заявок — реагировать не на что, значит и дёргать статистику незачем.
     """
     from sqlalchemy import func as sqlfunc
     result = await session.execute(
         select(sqlfunc.count()).select_from(Order).where(
-            Order.status == OrderStatus.CALL_APPROVED
+            Order.status.in_(SIGNAL_STATUSES)
         )
     )
     return result.scalar_one()

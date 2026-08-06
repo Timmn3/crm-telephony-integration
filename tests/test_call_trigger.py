@@ -340,9 +340,33 @@ async def test_admin_gets_notified(session, trigger_settings, started, fake_bot)
 # Цикл воркера
 # --------------------------------------------------------------------------- #
 
-async def test_tick_skips_api_without_approved_orders(monkeypatch, session,
-                                                      trigger_settings, fake_bot):
-    """Нет одобренных заявок — в API не ходим вообще (экономим общий лимит ВАТС)."""
+async def test_tick_polls_for_sent_order(monkeypatch, session, trigger_settings,
+                                         started, fake_bot):
+    """Заявка ещё не одобрена — опрашивать всё равно надо: звонок работает как запрос.
+
+    Этот случай уже ломался в бою: опрос запускался только при CALL_APPROVED, и
+    эскалация не срабатывала вообще.
+    """
+    admin, order = await _make_order(session, status=OrderStatus.SENT)
+    polled = False
+
+    async def fake_fetch(self, **kwargs):
+        nonlocal polled
+        polled = True
+        return [_event()]
+
+    monkeypatch.setattr(call_trigger.MangoClient, "fetch_recent_incoming", fake_fetch)
+    worked = await call_trigger._tick(fake_bot, trigger_settings)
+
+    assert worked is True
+    assert polled is True
+    assert order.status == OrderStatus.CALL_REQUESTED
+    assert any(m["chat_id"] == MANAGER_TG_ID for m in fake_bot.sent)
+
+
+async def test_tick_skips_api_without_any_orders(monkeypatch, session,
+                                                 trigger_settings, fake_bot):
+    """Нет заявок вообще — в API не ходим (экономим общий лимит ВАТС)."""
     called = False
 
     async def fake_fetch(self, **kwargs):

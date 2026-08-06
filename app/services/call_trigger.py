@@ -195,7 +195,7 @@ def _is_after_approval(started: object, approved_at: datetime | None) -> bool:
 async def _tick(bot: Bot, settings: Settings) -> bool:
     """Одна итерация. Возвращает True, если опрашивали API (были одобренные заявки)."""
     async with async_session_factory() as session:
-        pending = await order_repo.count_approved(session)
+        pending = await order_repo.count_awaiting_signal(session)
     if not pending:
         return False
 
