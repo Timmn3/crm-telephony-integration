@@ -48,3 +48,10 @@ docs/mango/*.txt
 # OS
 .DS_Store
 Thumbs.db
+settings.ini
+cookies*
+*.session
+state/
+.bashrc
+*.pem
+id_rsa
