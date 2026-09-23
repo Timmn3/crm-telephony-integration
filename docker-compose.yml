@@ -32,5 +32,17 @@ services:
       timeout: 3s
       retries: 5
 
+  # SSH-туннель к amoCRM. Включается COMPOSE_PROFILES=amo-tunnel в .env, бот
+  # ходит в него при AMOCRM_PROXY=socks5://amo-tunnel:1080. Если туннель лежит,
+  # страдают только запросы к amoCRM, поэтому бот от него не зависит (depends_on нет).
+  amo-tunnel:
+    build: ./docker/amo-tunnel
+    restart: unless-stopped
+    profiles: ["amo-tunnel"]
+    environment:
+      AMO_TUNNEL_SSH: ${AMO_TUNNEL_SSH:-amotunnel@<TUNNEL_HOST>}
+    volumes:
+      - ${AMO_TUNNEL_KEYS:-/opt/amo_tunnel}:/keys:ro
+
 volumes:
   pgdata:

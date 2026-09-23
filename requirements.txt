@@ -15,6 +15,8 @@ alembic>=1.13
 
 # HTTP client for amoCRM / Mango
 aiohttp>=3.9
+# SOCKS5 для amoCRM (AMOCRM_PROXY), когда хостинг режет до него TCP.
+aiohttp-socks>=0.12,<1.0
 
 # Configuration
 pydantic>=2.5

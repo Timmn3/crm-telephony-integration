@@ -39,7 +39,11 @@ async def main() -> None:
 
     if settings.coder_tg_id:
         try:
-            await bot.send_message(settings.coder_tg_id, "Бот call_masking_bot запущен 🚀")
+            amo_route = settings.amocrm_proxy or "напрямую"
+            await bot.send_message(
+                settings.coder_tg_id,
+                f"Бот call_masking_bot запущен 🚀\n🌐 amoCRM: {amo_route}",
+            )
         except Exception as exc:
             logger.warning("Не удалось уведомить кодера о запуске: %s", exc)
 

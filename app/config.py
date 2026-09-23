@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     amo_phone_field_id: int | None = Field(None, alias="AMO_PHONE_FIELD_ID")
     # Телефон синтетического клиента в режиме-заглушке (для отладки звонка).
     amocrm_stub_phone: str = Field("79991234567", alias="AMOCRM_STUB_PHONE")
+    # SOCKS5-прокси только для запросов к amoCRM, напр. socks5://amo-tunnel:1080.
+    # Нужен, когда хостинг бота режет TCP до amoCRM (s6 / SERVERS.RU): трафик идёт
+    # через SSH-туннель на другой сервер. Пусто — ходим напрямую.
+    amocrm_proxy: str = Field("", alias="AMOCRM_PROXY")
 
     # ------------------------------------------------------------------ Mango Office
     mango_api_key: str = Field("", alias="MANGO_API_KEY")

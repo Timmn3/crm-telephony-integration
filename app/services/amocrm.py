@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+from aiohttp_socks import ProxyConnector
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -29,6 +30,17 @@ _TIMEOUT = aiohttp.ClientTimeout(total=20)
 PHONE_FIELD_CODE = "PHONE"
 # За сколько до истечения access_token обновляем его заранее.
 _REFRESH_MARGIN = timedelta(minutes=5)
+
+
+def _new_http() -> aiohttp.ClientSession:
+    """HTTP-сессия к amoCRM: напрямую или через SOCKS5 (AMOCRM_PROXY).
+
+    rdns=True: имя хоста резолвит сам прокси. На том конце туннеля sshd пускает
+    только на конкретный домен amoCRM (permitopen), и сверяет он именно имя.
+    """
+    proxy = get_settings().amocrm_proxy
+    connector = ProxyConnector.from_url(proxy, rdns=True) if proxy else None
+    return aiohttp.ClientSession(timeout=_TIMEOUT, connector=connector)
 
 
 # --------------------------------------------------------------------------- #
@@ -131,7 +143,7 @@ class AmoCRMClient:
             raise AmoAuthError("Не задан поддомен amoCRM (AMOCRM_SUBDOMAIN).")
         url = f"{self.base_url}/oauth2/access_token"
         own_http = http is None
-        http = http or aiohttp.ClientSession(timeout=_TIMEOUT)
+        http = http or _new_http()
         try:
             async with http.post(url, json=payload) as resp:
                 if resp.status != 200:
@@ -219,7 +231,7 @@ class AmoCRMClient:
                 comment="Тестовая заявка (amoCRM не настроен)",
             )
 
-        async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+        async with _new_http() as http:
             lead = await self._get(http, f"/api/v4/leads/{lead_id}?with=contacts")
             if lead is None:
                 raise LeadNotFound(f"Сделка #{lead_id} не найдена.")
@@ -279,7 +291,7 @@ class AmoCRMClient:
                 "заданы реквизиты интеграции и не выполнена авторизация."
             )
         result: dict[str, list[CustomFieldInfo]] = {"leads": [], "contacts": []}
-        async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+        async with _new_http() as http:
             for entity in ("leads", "contacts"):
                 data = await self._get(
                     http, f"/api/v4/{entity}/custom_fields", allow_404=True

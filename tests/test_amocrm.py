@@ -3,11 +3,12 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from aiohttp_socks import ProxyConnector
 from aioresponses import aioresponses
 
 from app.config import get_settings
 from app.db.repositories import amo_token_repo
-from app.services.amocrm import AmoCRMClient, LeadNotFound, PhoneNotFound
+from app.services.amocrm import AmoCRMClient, LeadNotFound, PhoneNotFound, _new_http
 
 BASE = "https://test.amocrm.ru"
 
@@ -109,6 +110,25 @@ async def test_phone_not_found(session):
             m.get(f"{BASE}/api/v4/contacts/7", payload={"id": 7, "name": "Без телефона"})
             with pytest.raises(PhoneNotFound):
                 await AmoCRMClient(session).get_order_data(500)
+
+
+async def test_http_session_uses_socks_proxy_only_when_set():
+    """AMOCRM_PROXY задан - SOCKS5 с удалённым DNS, иначе обычный коннектор."""
+    s = get_settings()
+    saved = s.amocrm_proxy
+    try:
+        s.amocrm_proxy = "socks5://amo-tunnel:1080"
+        async with _new_http() as http:
+            assert isinstance(http.connector, ProxyConnector)
+            assert http.connector._proxy_host == "amo-tunnel"
+            assert http.connector._proxy_port == 1080
+            assert http.connector._rdns is True
+
+        s.amocrm_proxy = ""
+        async with _new_http() as http:
+            assert not isinstance(http.connector, ProxyConnector)
+    finally:
+        s.amocrm_proxy = saved
 
 
 async def test_token_refresh_on_401(session):
