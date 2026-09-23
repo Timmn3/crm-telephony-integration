@@ -195,7 +195,9 @@ def _is_after_approval(started: object, approved_at: datetime | None) -> bool:
 async def _tick(bot: Bot, settings: Settings) -> bool:
     """Одна итерация. Возвращает True, если опрашивали API (были одобренные заявки)."""
     async with async_session_factory() as session:
-        pending = await order_repo.count_awaiting_signal(session)
+        pending = await order_repo.count_awaiting_signal(
+            session, fresh_hours=settings.call_trigger_fresh_hours
+        )
     if not pending:
         return False
 
@@ -205,6 +207,9 @@ async def _tick(bot: Bot, settings: Settings) -> bool:
     for call in calls:
         await _handle_incoming(bot, settings, call)
     return True
+
+
+_BACKOFF_CAP_SEC = 900  # потолок паузы после серии неудач — 15 минут
 
 
 async def run_call_trigger(bot: Bot) -> None:
@@ -219,20 +224,37 @@ async def run_call_trigger(bot: Bot) -> None:
         "Воркер «звонок-сигнал»: %s",
         "запущен" if settings.call_trigger_active else "выключен (ждёт настройки)",
     )
+    # Счётчик подряд идущих неудач опроса — растягивает паузу экспоненциально,
+    # чтобы не долбить Mango во время блокировки/деградации и не продлевать её.
+    fail_streak = 0
     while True:
         delay = settings.call_trigger_idle_sec
         try:
             if settings.call_trigger_active:
                 worked = await _tick(bot, settings)
+                fail_streak = 0
                 delay = settings.call_trigger_poll_sec if worked else settings.call_trigger_idle_sec
         except asyncio.CancelledError:
             raise
         except MangoRateLimited as exc:
-            # Лимит общий на всю ВАТС — просто подождать подольше, это не поломка.
-            logger.info("Опрос статистики: %s Пауза.", exc)
-            delay = max(settings.call_trigger_poll_sec, 30)
+            fail_streak += 1
+            delay = min(settings.call_trigger_idle_sec * 2 ** fail_streak, _BACKOFF_CAP_SEC)
+            logger.info(
+                "Опрос статистики: %s Пауза %s с (сбой %s подряд).",
+                exc, delay, fail_streak,
+            )
         except MangoError as exc:
-            logger.warning("Опрос статистики не удался: %s", exc)
+            fail_streak += 1
+            delay = min(settings.call_trigger_idle_sec * 2 ** fail_streak, _BACKOFF_CAP_SEC)
+            logger.warning(
+                "Опрос статистики не удался (сбой %s подряд, пауза %s с): %s",
+                fail_streak, delay, exc,
+            )
         except Exception:
-            logger.exception("Непредвиденная ошибка воркера «звонок-сигнал»")
+            fail_streak += 1
+            delay = min(settings.call_trigger_idle_sec * 2 ** fail_streak, _BACKOFF_CAP_SEC)
+            logger.exception(
+                "Непредвиденная ошибка воркера «звонок-сигнал» (сбой %s подряд, пауза %s с)",
+                fail_streak, delay,
+            )
         await asyncio.sleep(delay)

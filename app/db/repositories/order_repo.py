@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -145,16 +145,21 @@ SIGNAL_STATUSES = (
 )
 
 
-async def count_awaiting_signal(session: AsyncSession) -> int:
+async def count_awaiting_signal(session: AsyncSession, *, fresh_hours: int) -> int:
     """Сколько заявок, по которым звонок админа имеет смысл.
 
     Воркер «звонка-сигнала» опрашивает API Mango, только если это число больше нуля:
     нет таких заявок — реагировать не на что, значит и дёргать статистику незачем.
+
+    Заявка без движения дольше `fresh_hours` уже не дождётся звонка-сигнала (её
+    рано или поздно закроет автозакрытие) — не тратим на неё лимит запросов к Mango.
     """
     from sqlalchemy import func as sqlfunc
+    fresh_since = datetime.now(timezone.utc) - timedelta(hours=fresh_hours)
     result = await session.execute(
         select(sqlfunc.count()).select_from(Order).where(
-            Order.status.in_(SIGNAL_STATUSES)
+            Order.status.in_(SIGNAL_STATUSES),
+            Order.updated_at >= fresh_since,
         )
     )
     return result.scalar_one()

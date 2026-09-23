@@ -18,7 +18,26 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = aiohttp.ClientTimeout(total=20)
+# sock_connect отдельно от total: при блокировке IP Mango соединение зависает на
+# уровне TCP (SYN молча дропается) — без этого лимита узнаём об этом только
+# через все 20 секунд total, а не через 5.
+_TIMEOUT = aiohttp.ClientTimeout(total=20, sock_connect=5)
+
+# Троттлер на процесс: выдерживает паузу между ЛЮБЫМИ запросами к Mango. Лимит
+# общий на продукт (см. MangoRateLimited) — без паузы параллельные операции
+# (статистика воркера + звонок по кнопке) легко превышают его вдвоём.
+_throttle_lock = asyncio.Lock()
+_last_request_at = 0.0
+
+
+async def _throttle(min_interval: float) -> None:
+    """Ждёт, если с прошлого запроса к Mango прошло меньше `min_interval` секунд."""
+    global _last_request_at
+    async with _throttle_lock:
+        wait = _last_request_at + min_interval - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_request_at = time.monotonic()
 
 # Mango трактует start_date/end_date как МОСКОВСКОЕ время, а прод-сервер живёт в UTC.
 # Без этого сдвига верхняя граница окна срезает последние 3 часа, и выглядит это как
@@ -201,14 +220,15 @@ class MangoClient:
         Телефоны в context передавать НЕЛЬЗЯ — он попадает в логи.
         """
         url = f"{self.settings.mango_api_url.rstrip('/')}/{path.lstrip('/')}"
+        await _throttle(self.settings.mango_min_interval_sec)
         try:
             async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
                 async with http.post(url, data=form) as resp:
                     text = await resp.text()
                     status = resp.status
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.error("Сетевая ошибка Mango (%s): %s", context, exc)
-            raise MangoError("Сервис Mango недоступен.") from exc
+            raise MangoError("Сервис Mango недоступен (таймаут/сеть).") from exc
 
         try:
             result = json.loads(text) if text else {}
@@ -236,15 +256,20 @@ class MangoClient:
         без `result`, и общий `_post_command` счёл бы это ошибкой.
         """
         url = f"{self.settings.mango_api_url.rstrip('/')}/{path.lstrip('/')}"
+        await _throttle(self.settings.mango_min_interval_sec)
         try:
             async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
                 async with http.post(url, data=form) as resp:
                     status = resp.status
                     text = await resp.text()
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.error("Сетевая ошибка Mango (%s): %s", path, exc)
-            raise MangoError("Сервис Mango недоступен.") from exc
+            raise MangoError("Сервис Mango недоступен (таймаут/сеть).") from exc
 
+        if status == 401:
+            # По доке (раздел 1.4.1) — блокировка доступа за неверные запросы,
+            # снимается сама через ~2 минуты после первой ошибки 3ХХХ.
+            raise MangoError(f"Mango: доступ заблокирован (HTTP 401, {path}).")
         if status == 429:
             raise MangoRateLimited(f"Mango: превышен лимит запросов ({path}).")
         if status != 200:
@@ -256,13 +281,13 @@ class MangoClient:
             raise MangoError(f"Mango вернул не-JSON ответ ({path}).") from None
 
     async def fetch_recent_incoming(
-        self, *, window_minutes: int = 15, limit: int = 100, attempts: int = 5,
+        self, *, window_minutes: int = 15, limit: int = 100, attempts: int = 3,
     ) -> list[dict]:
         """Возвращает входящие звонки ВАТС за последние `window_minutes` минут.
 
         Двухшаговый запрос: `stats/calls/request/` отдаёт ключ, по нему
-        `stats/calls/result/` возвращает готовый отчёт (формируется ~2 секунды).
-        Номера в ответе приходят как 7XXXXXXXXXX — тот же формат, что в `User.phone`.
+        `stats/calls/result/` возвращает готовый отчёт. На проде отчёт обычно готов
+        уже к первой попытке (замер: 0.08 с) — частые ретраи только жгут лимит.
 
         ВАЖНО: данные отстают от реальности на 1-2 минуты (замер: 52 и 108 секунд
         после отбоя). Это ограничение Mango, а не нашего кода.
@@ -286,7 +311,7 @@ class MangoClient:
         )
         for attempt in range(attempts):
             if attempt:
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
             payload = await self._post_raw("stats/calls/result/", result_form)
             if payload:
                 return parse_stats_calls(payload)

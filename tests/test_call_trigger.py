@@ -4,14 +4,16 @@
 Mango отдаёт все входящие ВАТС, включая звонки пациентов в колл-центр, поэтому
 каждое условие срабатывания проверяется отдельно.
 """
+import asyncio
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import update
 
 from app.config import get_settings
-from app.db.models import OrderStatus, UserRole
+from app.db.models import Order, OrderStatus, UserRole
 from app.db.repositories import group_repo, order_repo, user_repo
 from app.services import call_trigger
 from app.services.call_service import CallStartResult
@@ -135,6 +137,7 @@ def trigger_settings(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "call_trigger_enabled", True)
     monkeypatch.setattr(s, "mango_service_line", SERVICE_LINE)
+    monkeypatch.setattr(s, "call_trigger_fresh_hours", 3)
     return s
 
 
@@ -394,3 +397,58 @@ async def test_tick_polls_when_orders_waiting(monkeypatch, session, trigger_sett
     worked = await call_trigger._tick(fake_bot, trigger_settings)
     assert worked is True
     assert started == [order.id]
+
+
+async def test_tick_skips_stale_orders(monkeypatch, session, trigger_settings, fake_bot):
+    """Заявка без движения дольше call_trigger_fresh_hours звонка-сигнала уже не
+    дождётся (закроет автозакрытие) — незачем тратить на неё лимит запросов к Mango."""
+    admin, order = await _make_order(session)
+    stale_since = datetime.now(timezone.utc) - timedelta(hours=4)
+    await session.execute(
+        update(Order).where(Order.id == order.id).values(updated_at=stale_since)
+    )
+    await session.flush()
+
+    called = False
+
+    async def fake_fetch(self, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(call_trigger.MangoClient, "fetch_recent_incoming", fake_fetch)
+    worked = await call_trigger._tick(fake_bot, trigger_settings)
+    assert worked is False
+    assert called is False
+
+
+# --------------------------------------------------------------------------- #
+# Backoff при сбоях опроса
+# --------------------------------------------------------------------------- #
+
+async def test_run_call_trigger_backs_off_and_resets_after_success(
+    monkeypatch, trigger_settings, fake_bot
+):
+    """Серия сбоев растягивает паузу экспоненциально, успешный тик её сбрасывает."""
+    sleeps: list[float] = []
+    calls = {"n": 0}
+
+    async def fake_tick(bot, settings):
+        calls["n"] += 1
+        if calls["n"] in (1, 2):
+            raise MangoError("boom")
+        if calls["n"] == 3:
+            return False  # успех: заявок нет, но опрос прошёл без ошибки
+        raise asyncio.CancelledError  # выходим из бесконечного цикла воркера
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(call_trigger, "_tick", fake_tick)
+    monkeypatch.setattr(call_trigger.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await call_trigger.run_call_trigger(fake_bot)
+
+    idle = trigger_settings.call_trigger_idle_sec
+    assert sleeps == [idle * 2, idle * 4, idle]

@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     # федеральные 8-800 Mango не выпускает как исходящие. Только городской/мобильный
     # номер, подключённый к ВАТС, формат 7XXXXXXXXXX.
     mango_line_number: str = Field("", alias="MANGO_LINE_NUMBER")
+    # Минимальная пауза между ЛЮБЫМИ запросами к Mango (троттлер на процесс).
+    # Лимит на /stats — 1 запрос/2 сек на весь продукт (делим с интеграцией
+    # amoCRM), берём небольшой запас сверху документированного значения.
+    mango_min_interval_sec: float = Field(2.2, alias="MANGO_MIN_INTERVAL_SEC")
     # --- ВРЕМЕННО, только для прототипа «звонок без интернета» ---
     # Mango шлёт события ПО ВСЕМ входящим звонкам ВАТС, включая звонки пациентов
     # в колл-центр. Поэтому переводим вызов только при совпадении ВСЕХ трёх условий,
@@ -83,7 +87,7 @@ class Settings(BaseSettings):
     # Как часто опрашивать статистику, ПОКА есть одобренные заявки. Лимит Mango —
     # 1 запрос в 2 секунды на всю ВАТС (делим его с интеграцией amoCRM), плюс данные
     # всё равно отстают на 1-2 минуты, поэтому чаще смысла нет.
-    call_trigger_poll_sec: int = Field(15, alias="CALL_TRIGGER_POLL_SEC")
+    call_trigger_poll_sec: int = Field(30, alias="CALL_TRIGGER_POLL_SEC")
     # Пауза, когда одобренных заявок нет: в это время API не дёргаем вообще.
     call_trigger_idle_sec: int = Field(60, alias="CALL_TRIGGER_IDLE_SEC")
     # Глубина выборки статистики. С запасом на задержку Mango и краткие сбои опроса.
@@ -92,6 +96,9 @@ class Settings(BaseSettings):
     # Чтобы настойчивый админ не завалил менеджера сообщениями — не чаще раза в N минут
     # на одну заявку.
     call_trigger_nudge_cooldown_min: int = Field(5, alias="CALL_TRIGGER_NUDGE_COOLDOWN_MIN")
+    # Заявка без движения дольше N часов уже не дождётся звонка-сигнала —
+    # не тратим на неё лимит запросов к Mango (по факту закроется автозакрытием).
+    call_trigger_fresh_hours: int = Field(3, alias="CALL_TRIGGER_FRESH_HOURS")
 
     # ------------------------------------------------------------------ Сервер
     server_host: str = Field("0.0.0.0", alias="SERVER_HOST")
