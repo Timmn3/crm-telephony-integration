@@ -13,6 +13,9 @@ services:
     ports:
       # Только localhost: вебхуки не используются, наружу порт не торчит.
       - "127.0.0.1:${SERVER_PORT:-8080}:8080"
+    volumes:
+      # Файловый лог переживает пересборку контейнера (иначе каждый деплой его стирает).
+      - ./logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
