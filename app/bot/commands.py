@@ -21,6 +21,7 @@ _COMMANDS: dict[UserRole, list[BotCommand]] = {
         BotCommand(command="groups", description="Список групп и администраторов"),
         BotCommand(command="edit_group", description="Редактировать группу"),
         BotCommand(command="set_extension", description="Задать extension Mango для группы"),
+        BotCommand(command="set_phone", description="Сменить телефон администратора"),
         BotCommand(command="autoclose", description="Автозакрытие заявок (статус/настройка)"),
         BotCommand(command="delete_group", description="Удалить группу"),
         BotCommand(command="pending", description="Необработанные обращения"),
@@ -41,6 +42,7 @@ _COMMANDS: dict[UserRole, list[BotCommand]] = {
     UserRole.ADMIN: [
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="my_tasks", description="Мои заявки"),
+        BotCommand(command="change_phone", description="Сменить номер телефона"),
         BotCommand(command="me", description="Информация о себе"),
         BotCommand(command="cancel", description="Отменить текущее действие"),
     ],

@@ -1,8 +1,8 @@
 """Обработчики команд директора.
 
 Команды: /add_group, /groups, /edit_group, /delete_group, /add_manager,
-/add_admin, /set_extension, /autoclose, /users, /remove_user, /amo_fields,
-/set_amo_code.
+/add_admin, /set_extension, /set_phone, /autoclose, /users, /remove_user,
+/amo_fields, /set_amo_code.
 
 Примечание про Telegram: бот не может узнать tg_id по @username и не может
 написать пользователю первым, пока тот сам не обратится к боту. Способы добавить
@@ -25,6 +25,7 @@ from app.bot.commands import set_commands_for_user
 from app.bot.utils import format_group_lines
 from app.bot.filters.role import IsDirector, IsDirectorOrCoder
 from app.bot.keyboards.inline import (
+    admins_select_keyboard,
     cancel_keyboard,
     confirm_delete_group_keyboard,
     edit_group_field_keyboard,
@@ -41,11 +42,13 @@ from app.bot.states import (
     RemoveUser,
     SetAmoCode,
     SetExtension,
+    SetPhone,
 )
 from app.db.models import User, UserRole
 from app.db.repositories import group_repo, order_repo, pending_repo, user_repo
 from app.services import order_service
 from app.services.amocrm import AmoCRMClient, AmoCRMError
+from app.utils.phone import mask_phone, normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -659,6 +662,124 @@ async def set_extension_value(message: Message, state: FSMContext, session: Asyn
     await message.answer(
         f"✅ Extension <code>{html.escape(new_value)}</code> установлен для группы "
         f"«{html.escape(group.name)}» ({len(admins)} чел.: {html.escape(names)})."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Смена телефона администратора (директор)
+# --------------------------------------------------------------------------- #
+
+@router.message(Command("set_phone"), IsDirector)
+async def set_phone_start(
+    message: Message, command: CommandObject, state: FSMContext,
+    session: AsyncSession, bot: Bot,
+) -> None:
+    """/set_phone [<@username|tg_id> <номер>] - задать номер выездному админу.
+
+    Нужна, когда у администратора сменился телефон, а сам он ещё не успел
+    (или не может) выполнить /change_phone.
+    """
+    await state.clear()
+    if command.args:
+        parts = command.args.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "Формат: /set_phone <@username или tg_id> <номер>\n"
+                "Или просто /set_phone - выберите администратора кнопкой."
+            )
+            return
+        user, _tg_id, error = await _resolve_target(session, parts[0])
+        if error:
+            await message.answer(f"❌ {error}")
+            return
+        await _apply_admin_phone(message, bot, session, user, parts[1])
+        return
+
+    admins = await user_repo.list_by_role(session, UserRole.ADMIN, active_only=True)
+    if not admins:
+        await message.answer("Активных администраторов пока нет.")
+        return
+    await state.set_state(SetPhone.waiting_admin)
+    await message.answer(
+        "У какого администратора меняем номер телефона?",
+        reply_markup=admins_select_keyboard(admins, prefix="admin_set_phone"),
+    )
+
+
+@router.callback_query(SetPhone.waiting_admin, F.data.startswith("admin_set_phone:"))
+async def set_phone_pick_admin(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    tg_id = int(callback.data.split(":")[1])
+    user = await user_repo.get_by_tg_id(session, tg_id)
+    if user is None or user.role != UserRole.ADMIN:
+        await state.clear()
+        await callback.message.edit_text("❌ Администратор не найден.")
+        await callback.answer()
+        return
+    current = mask_phone(user.phone) if user.phone else "не указан"
+    await state.update_data(set_phone_tg_id=tg_id)
+    await state.set_state(SetPhone.waiting_phone)
+    await callback.message.edit_text(
+        f"Администратор <b>{html.escape(user.full_name or str(tg_id))}</b>.\n"
+        f"Текущий номер: <code>{current}</code>\n\n"
+        "Введите новый номер (например 89991234567):",
+        reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(SetPhone.waiting_phone, F.text)
+async def set_phone_value(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    data = await state.get_data()
+    user = await user_repo.get_by_tg_id(session, data.get("set_phone_tg_id", 0))
+    if user is None:
+        await state.clear()
+        await message.answer("❌ Администратор не найден.")
+        return
+    if normalize_phone(message.text) is None:
+        await message.answer(
+            "Не получилось распознать номер. Нужно 11 цифр, например 89991234567.\n"
+            "Повторите ввод или нажмите «Отмена».",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    await state.clear()
+    await _apply_admin_phone(message, bot, session, user, message.text)
+
+
+async def _apply_admin_phone(
+    message: Message, bot: Bot, session: AsyncSession, user: User | None, raw_phone: str
+) -> None:
+    """Проверяет и сохраняет номер выездного админа, уведомляет самого админа."""
+    if user is None or user.role != UserRole.ADMIN:
+        await message.answer("❌ Это не выездной администратор (или он боту неизвестен).")
+        return
+    phone = normalize_phone(raw_phone)
+    if phone is None:
+        await message.answer("❌ Не получилось распознать номер. Нужно 11 цифр, например 89991234567.")
+        return
+
+    old_phone = user.phone
+    name = html.escape(user.full_name or str(user.tg_id))
+    if old_phone == phone:
+        await message.answer(f"У {name} уже сохранён этот номер - менять нечего.")
+        return
+
+    await user_repo.set_phone(session, user, phone)
+    logger.info("Директор tg_id=%s сменил телефон администратору tg_id=%s (%s -> %s)",
+                message.from_user.id if message.from_user else None, user.tg_id,
+                mask_phone(old_phone), mask_phone(phone))
+    await message.answer(
+        f"✅ Номер администратора {name} обновлён: "
+        f"{mask_phone(old_phone)} → <code>{mask_phone(phone)}</code>."
+    )
+    await _notify_new_user(
+        bot, user.tg_id,
+        f"📱 Руководитель обновил ваш номер телефона для звонков: <code>{mask_phone(phone)}</code>.\n"
+        "Если номер неверный - сообщите руководителю или выполните /change_phone.",
     )
 
 

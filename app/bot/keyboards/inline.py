@@ -43,17 +43,19 @@ def groups_select_keyboard(
     return builder.as_markup()
 
 
-def admins_select_keyboard(admins: list[User]) -> InlineKeyboardMarkup:
-    """Выбор конкретного выездного администратора группы при создании заявки.
+def admins_select_keyboard(
+    admins: list[User], prefix: str = "select_admin"
+) -> InlineKeyboardMarkup:
+    """Выбор конкретного выездного администратора (заявка, смена телефона).
 
-    callback_data: ``select_admin:{tg_id}``.
+    callback_data: ``{prefix}:{tg_id}``; по умолчанию ``select_admin:{tg_id}``.
     """
     builder = InlineKeyboardBuilder()
     for admin in admins:
         name = admin.full_name or (
             f"@{admin.tg_username}" if admin.tg_username else str(admin.tg_id)
         )
-        builder.button(text=name, callback_data=f"select_admin:{admin.tg_id}")
+        builder.button(text=name, callback_data=f"{prefix}:{admin.tg_id}")
     builder.adjust(1)
     return builder.as_markup()
 

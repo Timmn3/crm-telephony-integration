@@ -9,16 +9,18 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters.role import IsAdmin
 from app.bot.utils import format_group_lines
 from app.bot.keyboards.reply import phone_request_keyboard, remove_keyboard
+from app.bot.states import ChangePhone
 from app.db.models import OrderStatus, User, UserRole
 from app.db.repositories import group_repo, order_repo, user_repo
 from app.services import call_service, order_service
-from app.utils.phone import normalize_phone
+from app.utils.phone import mask_phone, normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +44,85 @@ async def _notify(bot: Bot, tg_id: int, text: str, **kwargs) -> None:
         logger.warning("Не удалось уведомить tg_id=%s: %s", tg_id, exc)
 
 
+async def _apply_phone_change(
+    message: Message, user: User, phone: str, state: FSMContext,
+    session: AsyncSession, bot: Bot,
+) -> None:
+    """Меняет номер уже зарегистрированного администратора и уведомляет директоров.
+
+    Номер уходит в Mango как «откуда звонить», так что смена номера - это смена
+    того, на какой телефон пойдут звонки; директоры должны об этом знать.
+    """
+    await state.clear()
+    old_phone = user.phone
+    if old_phone == phone:
+        await message.answer("Этот номер у вас уже сохранён - менять нечего.",
+                             reply_markup=remove_keyboard())
+        return
+
+    await user_repo.set_phone(session, user, phone)
+    await message.answer(
+        f"✅ Номер телефона обновлён: <code>{mask_phone(phone)}</code>.\n"
+        "Звонки клиентам теперь будут идти на него.",
+        reply_markup=remove_keyboard(),
+    )
+    logger.info("Администратор tg_id=%s сменил телефон (%s -> %s)",
+                user.tg_id, mask_phone(old_phone), mask_phone(phone))
+
+    name = html.escape(user.full_name or str(user.tg_id))
+    for director in await user_repo.list_by_role(session, UserRole.DIRECTOR, active_only=True):
+        await _notify(
+            bot, director.tg_id,
+            f"📱 Администратор {name} сменил номер телефона: "
+            f"{mask_phone(old_phone)} → {mask_phone(phone)}",
+        )
+
+
+@router.message(Command("change_phone"), IsAdmin)
+async def change_phone_start(message: Message, user: User, state: FSMContext) -> None:
+    """/change_phone - администратор сам меняет номер для звонков."""
+    await state.set_state(ChangePhone.waiting_phone)
+    current = mask_phone(user.phone) if user.phone else "не указан"
+    await message.answer(
+        f"Текущий номер: <code>{current}</code>\n\n"
+        "Пришлите новый номер одним из способов:\n"
+        "• кнопка «Поделиться номером» - уйдёт номер вашего Telegram-аккаунта;\n"
+        "• или просто напишите номер сообщением, например 89991234567 "
+        "(если у телефона для звонков нет Telegram).\n\n"
+        "Отмена - /cancel",
+        reply_markup=phone_request_keyboard(
+            placeholder="Или введите номер: 89991234567"
+        ),
+    )
+
+
+@router.message(ChangePhone.waiting_phone, F.text, IsAdmin)
+async def change_phone_text(
+    message: Message, user: User, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    """Новый номер текстом (команды сюда не попадают: их ловят роутеры выше)."""
+    phone = normalize_phone(message.text)
+    if phone is None:
+        await message.answer(
+            "Не получилось распознать номер. Нужно 11 цифр, например 89991234567.\n"
+            "Попробуйте ещё раз или нажмите /cancel.",
+            reply_markup=phone_request_keyboard(
+                placeholder="Или введите номер: 89991234567"
+            ),
+        )
+        return
+    await _apply_phone_change(message, user, phone, state, session, bot)
+
+
 @router.message(F.contact)
-async def on_contact(message: Message, user: User | None, session: AsyncSession) -> None:
-    """Сохраняет номер администратора из пересланного контакта."""
+async def on_contact(
+    message: Message, user: User | None, session: AsyncSession,
+    state: FSMContext, bot: Bot,
+) -> None:
+    """Сохраняет номер администратора из пересланного контакта.
+
+    Если номер уже был - это смена (/change_phone), иначе завершение регистрации.
+    """
     if user is None or not user.is_active or user.role != UserRole.ADMIN:
         await message.answer("Спасибо, но номер телефона сейчас не требуется.",
                              reply_markup=remove_keyboard())
@@ -66,6 +144,10 @@ async def on_contact(message: Message, user: User | None, session: AsyncSession)
             "Не удалось распознать номер телефона. Попробуйте ещё раз.",
             reply_markup=phone_request_keyboard(),
         )
+        return
+
+    if user.phone:
+        await _apply_phone_change(message, user, phone, state, session, bot)
         return
 
     await user_repo.set_phone(session, user, phone)

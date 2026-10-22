@@ -33,6 +33,15 @@ class RemoveUser(StatesGroup):
     waiting_identifier = State()
 
 
+class ChangePhone(StatesGroup):
+    waiting_phone = State()    # администратор: контакт кнопкой или номер текстом
+
+
+class SetPhone(StatesGroup):
+    waiting_admin = State()    # директор: выбор администратора из инлайн-кнопок
+    waiting_phone = State()    # директор: ввод нового номера
+
+
 class CreateOrder(StatesGroup):
     waiting_lead_id = State()
     waiting_group = State()
