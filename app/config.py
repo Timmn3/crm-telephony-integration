@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # Нужен, когда хостинг бота режет TCP до amoCRM (s6 / SERVERS.RU): трафик идёт
     # через SSH-туннель на другой сервер. Пусто — ходим напрямую.
     amocrm_proxy: str = Field("", alias="AMOCRM_PROXY")
+    # То же для запросов к Mango: хостинг бота режет и их (таймауты на callback и
+    # статистике). Обычно тот же туннель, что и для amoCRM. Пусто — напрямую.
+    mango_proxy: str = Field("", alias="MANGO_PROXY")
 
     # ------------------------------------------------------------------ Mango Office
     mango_api_key: str = Field("", alias="MANGO_API_KEY")

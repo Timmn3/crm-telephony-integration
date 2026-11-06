@@ -5,6 +5,7 @@ import json
 import time
 
 import pytest
+from aiohttp_socks import ProxyConnector
 from aioresponses import aioresponses
 
 from app.config import get_settings
@@ -157,3 +158,18 @@ async def test_post_raw_reports_401_as_blocked_access(mango_settings):
         m.post(STATS_REQUEST_URL, status=401, body="")
         with pytest.raises(MangoError, match="заблокирован"):
             await MangoClient()._post_raw("stats/calls/request/", {"a": "1"})
+
+
+async def test_http_session_uses_socks_proxy_only_when_set(monkeypatch):
+    """MANGO_PROXY задан - SOCKS5 с удалённым DNS, иначе обычный коннектор."""
+    s = get_settings()
+    monkeypatch.setattr(s, "mango_proxy", "socks5://amo-tunnel:1080")
+    async with mango_module._new_http() as http:
+        assert isinstance(http.connector, ProxyConnector)
+        assert http.connector._proxy_host == "amo-tunnel"
+        assert http.connector._proxy_port == 1080
+        assert http.connector._rdns is True
+
+    monkeypatch.setattr(s, "mango_proxy", "")
+    async with mango_module._new_http() as http:
+        assert not isinstance(http.connector, ProxyConnector)

@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timedelta
 
 import aiohttp
+from aiohttp_socks import ProxyConnector
 
 from app.config import get_settings
 
@@ -22,6 +23,17 @@ logger = logging.getLogger(__name__)
 # уровне TCP (SYN молча дропается) — без этого лимита узнаём об этом только
 # через все 20 секунд total, а не через 5.
 _TIMEOUT = aiohttp.ClientTimeout(total=20, sock_connect=5)
+
+
+def _new_http() -> aiohttp.ClientSession:
+    """HTTP-сессия к Mango: напрямую или через SOCKS5 (MANGO_PROXY).
+
+    rdns=True: имя хоста резолвит сам прокси, а sshd на том конце туннеля
+    сверяет в permitopen именно имя (app.mango-office.ru:443).
+    """
+    proxy = get_settings().mango_proxy
+    connector = ProxyConnector.from_url(proxy, rdns=True) if proxy else None
+    return aiohttp.ClientSession(timeout=_TIMEOUT, connector=connector)
 
 # Троттлер на процесс: выдерживает паузу между ЛЮБЫМИ запросами к Mango. Лимит
 # общий на продукт (см. MangoRateLimited) — без паузы параллельные операции
@@ -222,7 +234,7 @@ class MangoClient:
         url = f"{self.settings.mango_api_url.rstrip('/')}/{path.lstrip('/')}"
         await _throttle(self.settings.mango_min_interval_sec)
         try:
-            async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+            async with _new_http() as http:
                 async with http.post(url, data=form) as resp:
                     text = await resp.text()
                     status = resp.status
@@ -258,7 +270,7 @@ class MangoClient:
         url = f"{self.settings.mango_api_url.rstrip('/')}/{path.lstrip('/')}"
         await _throttle(self.settings.mango_min_interval_sec)
         try:
-            async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+            async with _new_http() as http:
                 async with http.post(url, data=form) as resp:
                     status = resp.status
                     text = await resp.text()

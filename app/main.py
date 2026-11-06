@@ -40,9 +40,12 @@ async def main() -> None:
     if settings.coder_tg_id:
         try:
             amo_route = settings.amocrm_proxy or "напрямую"
+            mango_route = settings.mango_proxy or "напрямую"
             await bot.send_message(
                 settings.coder_tg_id,
-                f"Бот call_masking_bot запущен 🚀\n🌐 amoCRM: {amo_route}",
+                "Бот call_masking_bot запущен 🚀\n"
+                f"🌐 amoCRM: {amo_route}\n"
+                f"📞 Mango: {mango_route}",
             )
         except Exception as exc:
             logger.warning("Не удалось уведомить кодера о запуске: %s", exc)
