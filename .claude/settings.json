@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/PycharmProjects/My/call_masking_bot/.venv/Scripts/python.exe -m pip install --quiet paramiko)",
+      "Bash(/c/PycharmProjects/My/call_masking_bot/.venv/Scripts/python.exe -c \"import paramiko; print\\('paramiko', paramiko.__version__, 'OK'\\)\")",
+      "Bash(ssh s6 *)"
+    ]
+  }
+}

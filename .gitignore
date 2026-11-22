@@ -55,3 +55,6 @@ state/
 .bashrc
 *.pem
 id_rsa
+
+.claude/*
+!.claude/settings.json
